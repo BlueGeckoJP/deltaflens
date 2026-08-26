@@ -66,23 +66,19 @@ impl Render for MainApp {
                 let this = this.clone();
 
                 menu.item(PopupMenuItem::new("Open").on_click(move |_, _, cx| {
-                    // Use `?` within this block to simplify error handling and funnel all errors
-                    // into a single fallback path, so the UI can display the error without
-                    // duplicating error-handling code throughout the operation.
-                    #[allow(clippy::redundant_closure_call)]
-                    let result = (|| -> eyre::Result<()> {
-                        let Some(path) = FileDialog::new()
-                            .add_filter("Images", &SUPPORTED_EXTENSIONS)
-                            .pick_file()
-                        else {
-                            return Ok(());
-                        };
+                    let Some(path) = FileDialog::new()
+                        .add_filter("Images", &SUPPORTED_EXTENSIONS)
+                        .pick_file()
+                    else {
+                        return;
+                    };
 
-                        this.update(cx, |app, cx| {
-                            app.image = ImageState::Loading;
-                            cx.notify();
-                        });
+                    this.update(cx, |app, cx| {
+                        app.image = ImageState::Loading;
+                        cx.notify();
+                    });
 
+                    let task = cx.background_spawn(async move {
                         let mut rgba = image::open(path)?.into_rgba8();
 
                         for pixel in rgba.pixels_mut() {
@@ -90,24 +86,30 @@ impl Render for MainApp {
                         }
 
                         let frame = Frame::new(rgba);
-                        let render_image = Arc::new(RenderImage::new([frame]));
 
-                        this.update(cx, |app, cx| {
-                            app.image = ImageState::Loaded(render_image);
-                            cx.notify();
-                        });
+                        eyre::Ok(Arc::new(RenderImage::new([frame])))
+                    });
 
-                        Ok(())
-                    })();
+                    let this = this.clone();
 
-                    if let Err(e) = result {
-                        error!("Failed to open image: {e}");
+                    cx.spawn(async move |cx| match task.await {
+                        Ok(render_image) => {
+                            this.update(cx, |app, cx| {
+                                app.image = ImageState::Loaded(render_image);
+                                cx.notify();
+                            });
+                        }
 
-                        this.update(cx, |app, cx| {
-                            app.image = ImageState::Error(e.to_string());
-                            cx.notify();
-                        })
-                    }
+                        Err(e) => {
+                            error!("Failed to open image: {e}");
+
+                            this.update(cx, |app, cx| {
+                                app.image = ImageState::Error(e.to_string());
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .detach();
                 }))
                 .item(PopupMenuItem::Separator)
                 .item(PopupMenuItem::new("Close").on_click(|_, _, cx| {
