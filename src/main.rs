@@ -1,10 +1,14 @@
 use gpui::{
-    App, Bounds, Render, RenderImage, Window, WindowOptions, div, img, prelude::*, px, rgb, size,
+    AnyElement, App, Bounds, Entity, Render, RenderImage, SharedString, Window, WindowOptions, div,
+    img, prelude::*, px, rgb, size,
 };
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use image::{Frame, ImageFormat};
 use rfd::FileDialog;
-use std::sync::{Arc, LazyLock};
+use std::{
+    path::PathBuf,
+    sync::{Arc, LazyLock},
+};
 use tracing::error;
 use tracing_subscriber::EnvFilter;
 
@@ -27,33 +31,47 @@ struct MainApp {
     image: ImageState,
 }
 
+impl MainApp {
+    fn open_image(this: Entity<Self>, path: PathBuf, cx: &mut App) {
+        this.update(cx, |app, cx| {
+            app.image = ImageState::Loading;
+            cx.notify();
+        });
+
+        let task = cx.background_spawn(decode_image(path));
+
+        let this = this.clone();
+
+        cx.spawn(async move |cx| match task.await {
+            Ok(render_image) => {
+                this.update(cx, |app, cx| {
+                    app.image = ImageState::Loaded(render_image);
+                    cx.notify();
+                });
+            }
+
+            Err(e) => {
+                error!("Failed to open image: {e}");
+
+                this.update(cx, |app, cx| {
+                    app.image = ImageState::Error(e.to_string());
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+}
+
 impl Render for MainApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.entity();
 
         let image_content = match &self.image {
-            ImageState::Empty => div()
-                .size_full()
-                .flex()
-                .justify_center()
-                .items_center()
-                .child("No image")
-                .into_any_element(),
-            ImageState::Loading => div()
-                .size_full()
-                .flex()
-                .justify_center()
-                .items_center()
-                .child("Loading...")
-                .into_any_element(),
+            ImageState::Empty => centered_message("No image"),
+            ImageState::Loading => centered_message("Loading..."),
             ImageState::Loaded(image) => img(image.clone()).into_any_element(),
-            ImageState::Error(e) => div()
-                .size_full()
-                .flex()
-                .justify_center()
-                .items_center()
-                .child(e.to_owned())
-                .into_any_element(),
+            ImageState::Error(e) => centered_message(e.to_owned()),
         };
 
         div()
@@ -73,43 +91,7 @@ impl Render for MainApp {
                         return;
                     };
 
-                    this.update(cx, |app, cx| {
-                        app.image = ImageState::Loading;
-                        cx.notify();
-                    });
-
-                    let task = cx.background_spawn(async move {
-                        let mut rgba = image::open(path)?.into_rgba8();
-
-                        for pixel in rgba.pixels_mut() {
-                            pixel.0.swap(0, 2);
-                        }
-
-                        let frame = Frame::new(rgba);
-
-                        eyre::Ok(Arc::new(RenderImage::new([frame])))
-                    });
-
-                    let this = this.clone();
-
-                    cx.spawn(async move |cx| match task.await {
-                        Ok(render_image) => {
-                            this.update(cx, |app, cx| {
-                                app.image = ImageState::Loaded(render_image);
-                                cx.notify();
-                            });
-                        }
-
-                        Err(e) => {
-                            error!("Failed to open image: {e}");
-
-                            this.update(cx, |app, cx| {
-                                app.image = ImageState::Error(e.to_string());
-                                cx.notify();
-                            });
-                        }
-                    })
-                    .detach();
+                    MainApp::open_image(this.clone(), path, cx);
                 }))
                 .item(PopupMenuItem::Separator)
                 .item(PopupMenuItem::new("Close").on_click(|_, _, cx| {
@@ -118,6 +100,28 @@ impl Render for MainApp {
             })
             .child(image_content)
     }
+}
+
+fn centered_message(message: impl Into<SharedString>) -> AnyElement {
+    div()
+        .size_full()
+        .flex()
+        .justify_center()
+        .items_center()
+        .child(message.into())
+        .into_any_element()
+}
+
+async fn decode_image(path: PathBuf) -> eyre::Result<Arc<RenderImage>> {
+    let mut rgba = image::open(path)?.into_rgba8();
+
+    for pixel in rgba.pixels_mut() {
+        pixel.0.swap(0, 2);
+    }
+
+    let frame = Frame::new(rgba);
+
+    Ok(Arc::new(RenderImage::new([frame])))
 }
 
 fn main() {
