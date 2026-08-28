@@ -98,8 +98,6 @@ impl MainApp {
             self.zoom /= 1.1;
         }
 
-        ;et me
-
         self.zoom = self.zoom.clamp(min_zoom, max_zoom);
 
         cx.notify();
