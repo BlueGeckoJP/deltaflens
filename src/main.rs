@@ -1,7 +1,7 @@
 use gpui::{
     AnyElement, App, Bounds, Entity, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render,
     RenderImage, ScrollDelta, ScrollWheelEvent, SharedString, Size, Window, WindowOptions, div,
-    img, point, prelude::*, px, rgb, size,
+    img, prelude::*, px, rgb, size,
 };
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use image::{Frame, ImageFormat};
@@ -180,20 +180,12 @@ impl Render for MainApp {
                         }),
                     )
                     .child(
-                        div()
-                            .size_full()
-                            .flex()
-                            .justify_center()
-                            .items_center()
-                            .child(
-                                div()
-                                    .absolute()
-                                    .left(px(left))
-                                    .top(px(top))
-                                    .w(px(scaled_width))
-                                    .h(px(scaled_height))
-                                    .child(img(image.clone()).size_full()),
-                            ),
+                        img(image.clone())
+                            .absolute()
+                            .left(px(left))
+                            .top(px(top))
+                            .w(px(scaled_width))
+                            .h(px(scaled_height)),
                     )
                     .into_any_element()
             }
@@ -209,16 +201,41 @@ impl Render for MainApp {
             .context_menu(move |menu, _window, _cx| {
                 let this = this.clone();
 
-                menu.item(PopupMenuItem::new("Open").on_click(move |_, window, cx| {
-                    let Some(path) = FileDialog::new()
-                        .add_filter("Images", &SUPPORTED_EXTENSIONS)
-                        .pick_file()
-                    else {
-                        return;
-                    };
+                menu.item(PopupMenuItem::new("Open").on_click({
+                    let this = this.clone();
 
-                    MainApp::open_image(this.clone(), window, cx, path);
+                    move |_, window, cx| {
+                        let Some(path) = FileDialog::new()
+                            .add_filter("Images", &SUPPORTED_EXTENSIONS)
+                            .pick_file()
+                        else {
+                            return;
+                        };
+
+                        MainApp::open_image(this.clone(), window, cx, path);
+                    }
                 }))
+                .item(PopupMenuItem::Separator)
+                .item(
+                    PopupMenuItem::new("Reset Image").on_click(move |_, window, cx| {
+                        this.update(cx, |app, cx| {
+                            let ImageState::Loaded(image) = &app.image else {
+                                return;
+                            };
+
+                            app.zoom = calculate_min_zoom(
+                                image,
+                                window.bounds().size,
+                                window.scale_factor(),
+                            );
+                            app.image_offset = Point::default();
+
+                            cx.notify();
+                        });
+
+                        window.refresh();
+                    }),
+                )
                 .item(PopupMenuItem::Separator)
                 .item(PopupMenuItem::new("Close").on_click(|_, _, cx| {
                     cx.quit();
