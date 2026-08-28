@@ -1,6 +1,7 @@
 use gpui::{
-    AnyElement, App, Bounds, Entity, Pixels, Render, RenderImage, ScrollDelta, ScrollWheelEvent,
-    SharedString, Size, Window, WindowOptions, div, img, prelude::*, px, rgb, size,
+    AnyElement, App, Bounds, Entity, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render,
+    RenderImage, ScrollDelta, ScrollWheelEvent, SharedString, Size, Window, WindowOptions, div,
+    img, point, prelude::*, px, rgb, size,
 };
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use image::{Frame, ImageFormat};
@@ -30,6 +31,8 @@ enum ImageState {
 struct MainApp {
     image: ImageState,
     zoom: f32,
+    image_offset: Point<Pixels>,
+    last_mouse_position: Option<Point<Pixels>>,
 }
 
 impl MainApp {
@@ -111,6 +114,15 @@ impl Render for MainApp {
             ImageState::Loaded(image) => {
                 let image_size = image.size(0).to_pixels(window.scale_factor());
 
+                let scaled_width = image_size.width.as_f32() * self.zoom;
+                let scaled_height = image_size.height.as_f32() * self.zoom;
+
+                let viewport_size = window.viewport_size();
+                let left = (viewport_size.width.as_f32() - scaled_width) / 2.0
+                    + self.image_offset.x.as_f32();
+                let top = (viewport_size.height.as_f32() - scaled_height) / 2.0
+                    + self.image_offset.y.as_f32();
+
                 div()
                     .size_full()
                     .flex()
@@ -118,11 +130,51 @@ impl Render for MainApp {
                     .items_center()
                     .overflow_hidden()
                     .on_scroll_wheel(cx.listener(Self::handle_image_zoom_scroll))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, _, _| {
+                            this.last_mouse_position = Some(event.position);
+                        }),
+                    )
+                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                        if event.pressed_button != Some(gpui::MouseButton::Left) {
+                            return;
+                        }
+
+                        let Some(last_position) = this.last_mouse_position else {
+                            return;
+                        };
+
+                        let delta = event.position - last_position;
+
+                        this.image_offset.x += delta.x;
+                        this.image_offset.y += delta.y;
+
+                        this.last_mouse_position = Some(event.position);
+
+                        cx.notify();
+                    }))
+                    .on_mouse_up(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _, _, _| {
+                            this.last_mouse_position = None;
+                        }),
+                    )
                     .child(
                         div()
-                            .w(px(image_size.width.as_f32() * self.zoom))
-                            .h(px(image_size.height.as_f32() * self.zoom))
-                            .child(img(image.clone()).size_full()),
+                            .size_full()
+                            .flex()
+                            .justify_center()
+                            .items_center()
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(left))
+                                    .top(px(top))
+                                    .w(px(scaled_width))
+                                    .h(px(scaled_height))
+                                    .child(img(image.clone()).size_full()),
+                            ),
                     )
                     .into_any_element()
             }
@@ -220,6 +272,8 @@ fn main() {
                     MainApp {
                         image: ImageState::Empty,
                         zoom: 1.0,
+                        image_offset: point(px(0.0), px(0.0)),
+                        last_mouse_position: None,
                     }
                 })
             },
