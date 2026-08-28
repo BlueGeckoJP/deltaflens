@@ -39,7 +39,9 @@ impl MainApp {
     fn open_image(this: Entity<Self>, window: &Window, cx: &mut App, path: PathBuf) {
         this.update(cx, |app, cx| {
             app.image = ImageState::Loading;
-            cx.notify();
+            app.zoom = 1.0;
+            app.image_offset = Point::default();
+            cx.notify()
         });
 
         let window_size = window.bounds().size;
@@ -91,11 +93,20 @@ impl MainApp {
             ScrollDelta::Pixels(delta) => f32::from(delta.y),
             ScrollDelta::Lines(delta) => delta.y * 20.0,
         };
+        let factor = if delta > 0.0 { 1.1 } else { 1.0 / 1.1 };
 
-        if delta > 0.0 {
-            self.zoom *= 1.1;
-        } else {
-            self.zoom /= 1.1;
+        let old_zoom = self.zoom;
+        let new_zoom = (self.zoom * factor).clamp(min_zoom, max_zoom);
+
+        if new_zoom != old_zoom {
+            let ratio = new_zoom / self.zoom;
+
+            self.image_offset.x *= ratio;
+            self.image_offset.y *= ratio;
+
+            self.zoom = new_zoom;
+
+            cx.notify();
         }
 
         self.zoom = self.zoom.clamp(min_zoom, max_zoom);
