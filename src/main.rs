@@ -78,10 +78,6 @@ impl MainApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !event.modifiers.control {
-            return;
-        }
-
         let ImageState::Loaded(image) = &self.image else {
             return;
         };
