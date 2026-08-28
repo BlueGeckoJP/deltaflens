@@ -21,7 +21,9 @@ static SUPPORTED_EXTENSIONS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
         .collect()
 });
 
+#[derive(Debug, Default)]
 enum ImageState {
+    #[default]
     Empty,
     Loading,
     Loaded(Arc<RenderImage>),
@@ -35,12 +37,22 @@ struct MainApp {
     last_mouse_position: Option<Point<Pixels>>,
 }
 
+impl Default for MainApp {
+    fn default() -> Self {
+        Self {
+            image: ImageState::default(),
+            zoom: 1.0,
+            image_offset: Point::default(),
+            last_mouse_position: None,
+        }
+    }
+}
+
 impl MainApp {
     fn open_image(this: Entity<Self>, window: &Window, cx: &mut App, path: PathBuf) {
         this.update(cx, |app, cx| {
+            *app = MainApp::default();
             app.image = ImageState::Loading;
-            app.zoom = 1.0;
-            app.image_offset = Point::default();
             cx.notify()
         });
 
@@ -276,12 +288,7 @@ fn main() {
                     })
                     .detach();
 
-                    MainApp {
-                        image: ImageState::Empty,
-                        zoom: 1.0,
-                        image_offset: point(px(0.0), px(0.0)),
-                        last_mouse_position: None,
-                    }
+                    MainApp::default()
                 })
             },
         )
