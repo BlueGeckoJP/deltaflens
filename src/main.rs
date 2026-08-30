@@ -1,7 +1,7 @@
 use gpui::{
-    AnyElement, App, Bounds, Entity, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render,
-    RenderImage, ScrollDelta, ScrollWheelEvent, SharedString, Size, Window, WindowOptions, div,
-    img, prelude::*, px, rgb, size,
+    AnyElement, App, Bounds, Entity, FocusHandle, KeyUpEvent, MouseDownEvent, MouseMoveEvent,
+    Pixels, Point, Render, RenderImage, ScrollDelta, ScrollWheelEvent, SharedString, Size, Window,
+    WindowOptions, div, img, prelude::*, px, rgb, size,
 };
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use image::{Frame, ImageFormat};
@@ -21,6 +21,12 @@ static SUPPORTED_EXTENSIONS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
         .collect()
 });
 
+#[derive(Clone, Copy)]
+enum ImageNavigation {
+    Previous,
+    Next,
+}
+
 #[derive(Debug, Default)]
 enum ImageState {
     #[default]
@@ -30,58 +36,192 @@ enum ImageState {
     Error(String),
 }
 
+#[derive(Debug, Default)]
+enum ImageSelection {
+    #[default]
+    None,
+    Standalone {
+        #[allow(dead_code)]
+        path: PathBuf,
+    },
+    Directory {
+        #[allow(dead_code)]
+        directory: PathBuf,
+        images: Vec<PathBuf>,
+        current_index: usize,
+    },
+}
+
 struct MainApp {
+    focus_handle: FocusHandle,
+
     image: ImageState,
+    selection: ImageSelection,
+    open_generation: u64,
+
     zoom: f32,
     image_offset: Point<Pixels>,
     last_mouse_position: Option<Point<Pixels>>,
 }
 
-impl Default for MainApp {
-    fn default() -> Self {
+impl MainApp {
+    fn new(cx: &mut Context<Self>) -> Self {
         Self {
+            focus_handle: cx.focus_handle(),
+
             image: ImageState::default(),
+            selection: ImageSelection::default(),
+            open_generation: 0,
+
             zoom: 1.0,
             image_offset: Point::default(),
             last_mouse_position: None,
         }
     }
-}
 
-impl MainApp {
+    fn spawn_decode(
+        this: Entity<Self>,
+        cx: &mut App,
+        path: PathBuf,
+        generation: u64,
+        window_size: Size<Pixels>,
+        scale_factor: f32,
+    ) {
+        let task = cx.background_spawn(decode_image(path));
+
+        cx.spawn(async move |cx| {
+            let result = task.await;
+
+            this.update(cx, |app, cx| {
+                if app.open_generation != generation {
+                    return;
+                }
+
+                match result {
+                    Ok(render_image) => {
+                        app.zoom = calculate_min_zoom(&render_image, window_size, scale_factor);
+                        app.image = ImageState::Loaded(render_image);
+                    }
+
+                    Err(e) => {
+                        error!("Failed to open image: {e}");
+                        app.image = ImageState::Error(e.to_string());
+                    }
+                }
+
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn open_image(this: Entity<Self>, window: &Window, cx: &mut App, path: PathBuf) {
-        this.update(cx, |app, cx| {
-            *app = MainApp::default();
-            app.image = ImageState::Loading;
-            cx.notify()
-        });
-
+        let path = match make_absolute(path) {
+            Ok(path) => path,
+            Err(e) => {
+                error!("Failed to make path absolute: {e}");
+                return;
+            }
+        };
         let window_size = window.bounds().size;
         let scale_factor = window.scale_factor();
 
-        let task = cx.background_spawn(decode_image(path));
+        let generation = this.update(cx, |app, cx| {
+            app.open_generation = app.open_generation.wrapping_add(1);
 
-        let this = this.clone();
+            app.image = ImageState::Loading;
+            app.selection = ImageSelection::Standalone { path: path.clone() };
 
-        cx.spawn(async move |cx| match task.await {
-            Ok(render_image) => {
-                this.update(cx, |app, cx| {
-                    app.zoom = calculate_min_zoom(&render_image, window_size, scale_factor);
-                    app.image = ImageState::Loaded(render_image);
-                    cx.notify();
-                });
-            }
+            app.zoom = 1.0;
+            app.image_offset = Point::default();
+            app.last_mouse_position = None;
 
-            Err(e) => {
-                error!("Failed to open image: {e}");
+            cx.notify();
+            app.open_generation
+        });
 
-                this.update(cx, |app, cx| {
-                    app.image = ImageState::Error(e.to_string());
-                    cx.notify();
-                });
-            }
+        Self::spawn_decode(
+            this.clone(),
+            cx,
+            path.clone(),
+            generation,
+            window_size,
+            scale_factor,
+        );
+
+        let scan_path = path.clone();
+        let scan_task = cx.background_spawn(async move { MainApp::scan_directory(scan_path) });
+
+        cx.spawn(async move |cx| {
+            let result = scan_task.await;
+
+            this.update(cx, |app, cx| {
+                if app.open_generation != generation {
+                    return;
+                }
+
+                match result {
+                    Ok(Some(selection)) => {
+                        app.selection = selection;
+                        cx.notify();
+                    }
+                    Ok(None) => {}
+                    Err(e) => error!("Failed to scan image directory: {e}"),
+                }
+            });
         })
         .detach();
+    }
+
+    fn scan_directory(selected_path: PathBuf) -> eyre::Result<Option<ImageSelection>> {
+        let Some(directory) = selected_path.parent() else {
+            return Ok(None);
+        };
+
+        let mut images = Vec::new();
+
+        for entry in std::fs::read_dir(directory)? {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    error!("Failed to read directory entry: {e}");
+                    continue;
+                }
+            };
+
+            let path = entry.path();
+
+            let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
+                continue;
+            };
+
+            if !SUPPORTED_EXTENSIONS
+                .iter()
+                .any(|supported| extension.eq_ignore_ascii_case(supported))
+            {
+                continue;
+            }
+
+            match std::fs::metadata(&path) {
+                Ok(metadata) if metadata.is_file() => images.push(path),
+                Ok(_) => {}
+                Err(e) => {
+                    error!("Failed to inspect {path:?}: {e}");
+                }
+            }
+        }
+
+        images.sort_by(|a, b| natord::compare(&a.to_string_lossy(), &b.to_string_lossy()));
+
+        let Some(current_index) = images.iter().position(|path| path == &selected_path) else {
+            return Ok(None);
+        };
+
+        Ok(Some(ImageSelection::Directory {
+            directory: directory.to_path_buf(),
+            images,
+            current_index,
+        }))
     }
 
     fn handle_image_zoom_scroll(
@@ -120,6 +260,57 @@ impl MainApp {
         self.zoom = self.zoom.clamp(min_zoom, max_zoom);
 
         cx.notify();
+    }
+
+    fn navigate_image(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+        navigation: ImageNavigation,
+    ) {
+        let path = match &mut self.selection {
+            ImageSelection::Directory {
+                images,
+                current_index,
+                ..
+            } if images.len() > 1 => {
+                *current_index = match navigation {
+                    ImageNavigation::Previous => {
+                        if *current_index == 0 {
+                            images.len() - 1
+                        } else {
+                            *current_index - 1
+                        }
+                    }
+
+                    ImageNavigation::Next => (*current_index + 1) % images.len(),
+                };
+
+                images[*current_index].clone()
+            }
+            _ => return,
+        };
+
+        self.open_generation = self.open_generation.wrapping_add(1);
+        let generation = self.open_generation;
+
+        self.image = ImageState::Loading;
+        self.zoom = 1.0;
+        self.image_offset = Point::default();
+        self.last_mouse_position = None;
+
+        cx.notify();
+
+        let this = cx.entity();
+
+        Self::spawn_decode(
+            this,
+            cx,
+            path,
+            generation,
+            window.bounds().size,
+            window.scale_factor(),
+        );
     }
 }
 
@@ -193,6 +384,18 @@ impl Render for MainApp {
         };
 
         div()
+            .track_focus(&self.focus_handle)
+            .on_key_up(cx.listener(|app, event: &KeyUpEvent, window, cx| {
+                match event.keystroke.key.as_str() {
+                    "left" => {
+                        app.navigate_image(window, cx, ImageNavigation::Previous);
+                    }
+                    "right" => {
+                        app.navigate_image(window, cx, ImageNavigation::Next);
+                    }
+                    _ => {}
+                }
+            }))
             .bg(rgb(0xffffff))
             .size_full()
             .flex()
@@ -242,6 +445,14 @@ impl Render for MainApp {
                 }))
             })
             .child(image_content)
+    }
+}
+
+fn make_absolute(path: PathBuf) -> eyre::Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(std::env::current_dir()?.join(path))
     }
 }
 
@@ -305,7 +516,9 @@ fn main() {
                     })
                     .detach();
 
-                    MainApp::default()
+                    let app = MainApp::new(cx);
+                    window.focus(&app.focus_handle, cx);
+                    app
                 })
             },
         )
