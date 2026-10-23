@@ -1,3 +1,5 @@
+// Not used by the UI yet; the core crate is wired up ahead of the UI issues.
+use deltaflens_core as _;
 use eyre::Result;
 use gpui::{
     App, Bounds, Context, TitlebarOptions, Window, WindowBounds, WindowOptions, div, prelude::*,

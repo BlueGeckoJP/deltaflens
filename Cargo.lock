@@ -1133,11 +1133,19 @@ name = "deltaflens"
 version = "0.1.0"
 dependencies = [
  "color-eyre",
+ "deltaflens-core",
  "eyre",
  "gpui",
  "gpui_platform",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "deltaflens-core"
+version = "0.1.0"
+dependencies = [
+ "eyre",
 ]
 
 [[package]]
