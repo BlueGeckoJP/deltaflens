@@ -14,6 +14,7 @@ Zed の `Pane` / `PaneGroup` と同じ考え方。
 
 - UI に依存しない部分（デコード、フォルダの走査、並べ替え、レイアウトの木など）は gpui に依存させず、UI と分ける。
 - この部分にはユニットテストを書く。
+- UI に依存しない部分は `deltaflens-core` に置く。gpui への依存はクレートを分けることでコンパイラーに守らせる。
 
 ## gpui について
 
@@ -25,9 +26,9 @@ Zed の `Pane` / `PaneGroup` と同じ考え方。
 次をすべて通す。
 
 ```sh
-cargo fmt
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```
 
 ## コードの約束
