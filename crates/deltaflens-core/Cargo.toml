@@ -5,6 +5,26 @@ edition = "2024"
 
 [dependencies]
 eyre = "0.6"
+# The same major version and formats as gpui. The default "avif" feature is
+# left out: it only adds an encoder, yet makes `ImageFormat::Avif` report
+# reading as enabled.
+image = { version = "0.25", default-features = false, features = [
+    "bmp",
+    "dds",
+    "exr",
+    "ff",
+    "gif",
+    "hdr",
+    "ico",
+    "jpeg",
+    "png",
+    "pnm",
+    "qoi",
+    "rayon",
+    "tga",
+    "tiff",
+    "webp",
+] }
 
 [lints]
 workspace = true
