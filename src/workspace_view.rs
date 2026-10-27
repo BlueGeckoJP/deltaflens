@@ -3,12 +3,13 @@ use std::{collections::HashMap, path::PathBuf};
 use deltaflens_core::{Axis, Direction, Layout, PaneId, Tab, TabContent, TabId, Workspace};
 use eyre::Result;
 use gpui::{
-    AnyElement, Context, Entity, FocusHandle, Window, actions, div, prelude::*, relative, rgb,
+    AnyElement, Context, Entity, FocusHandle, PathPromptOptions, Window, actions, div, prelude::*,
+    relative, rgb,
 };
 
 use crate::viewer::Viewer;
 
-actions!(deltaflens, [ResetView, PreviousImage, NextImage]);
+actions!(deltaflens, [Open, ResetView, PreviousImage, NextImage]);
 
 pub const APP_NAME: &str = "deltaflens";
 
@@ -51,6 +52,37 @@ impl WorkspaceView {
         Ok(())
     }
 
+    /// Shows `path` in the active tab of the focused pane, or in a new tab if
+    /// the pane has none.
+    fn open_in_active_tab(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let result = match self.active_tab().map(Tab::id) {
+            Some(tab_id) => self.replace_tab_path(tab_id, path, window, cx),
+            None => self.open_in_new_tab(path, window, cx),
+        };
+        if let Err(error) = result {
+            tracing::error!("{error:#}");
+        }
+    }
+
+    /// Shows `path` in a tab of the focused pane.
+    fn replace_tab_path(
+        &mut self,
+        tab_id: TabId,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let content = TabContent::Viewer { path: path.clone() };
+        self.workspace
+            .pane_mut(self.workspace.focused_pane())?
+            .set_tab_content(tab_id, content)?;
+        if let Some(viewer) = self.viewers.get(&tab_id) {
+            viewer.update(cx, |viewer, cx| viewer.load(path, window, cx));
+        }
+        cx.notify();
+        Ok(())
+    }
+
     fn active_tab(&self) -> Option<&Tab> {
         self.workspace
             .pane(self.workspace.focused_pane())
@@ -86,23 +118,43 @@ impl WorkspaceView {
         let Some(tab_id) = self.active_tab().map(Tab::id) else {
             return;
         };
-        let Some(viewer) = self.viewers.get(&tab_id).cloned() else {
+        let Some(path) = self
+            .viewers
+            .get(&tab_id)
+            .and_then(|viewer| viewer.read(cx).neighbor(direction))
+        else {
             return;
         };
-        let Some(path) = viewer.read(cx).neighbor(direction) else {
-            return;
-        };
-        let content = TabContent::Viewer { path: path.clone() };
-        let result = self
-            .workspace
-            .pane_mut(self.workspace.focused_pane())
-            .and_then(|pane| pane.set_tab_content(tab_id, content));
-        if let Err(error) = result {
+        if let Err(error) = self.replace_tab_path(tab_id, path, window, cx) {
             tracing::error!("{error:#}");
-            return;
         }
-        viewer.update(cx, |viewer, cx| viewer.load(path, window, cx));
-        cx.notify();
+    }
+
+    #[expect(clippy::unused_self, reason = "`cx.listener` takes a method")]
+    fn open(&mut self, _: &Open, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: None,
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let path = match paths.await {
+                Ok(Ok(paths)) => paths.and_then(|paths| paths.into_iter().next()),
+                Ok(Err(error)) => {
+                    tracing::error!("failed to show the file dialog: {error:#}");
+                    None
+                }
+                // The dialog was dropped without an answer.
+                Err(_) => None,
+            };
+            if let Some(path) = path {
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.open_in_active_tab(path, window, cx);
+                });
+            }
+        })
+        .detach();
     }
 
     /// Shows the file name of the active tab in the window title.
@@ -159,6 +211,7 @@ impl Render for WorkspaceView {
             .size_full()
             .bg(rgb(0x1e_1e_1e))
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::open))
             .on_action(cx.listener(Self::reset_view))
             .on_action(cx.listener(Self::previous_image))
             .on_action(cx.listener(Self::next_image))

@@ -7,6 +7,7 @@ edition = "2024"
 members = ["crates/*"]
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
 color-eyre = "0.6"
 deltaflens-core = { path = "crates/deltaflens-core" }
 eyre = "0.6"
