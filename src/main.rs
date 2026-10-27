@@ -1,19 +1,15 @@
-// Not used by the UI yet; the core crate is wired up ahead of the UI issues.
-use deltaflens_core as _;
+mod viewer;
+mod workspace_view;
+
+use std::path::PathBuf;
+
 use eyre::Result;
 use gpui::{
-    App, Bounds, Context, TitlebarOptions, Window, WindowBounds, WindowOptions, div, prelude::*,
-    px, size,
+    App, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, px, size,
 };
 use tracing_subscriber::EnvFilter;
 
-struct RootView;
-
-impl Render for RootView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full()
-    }
-}
+use crate::workspace_view::{ResetView, WorkspaceView};
 
 fn main() -> Result<()> {
     color_eyre::install()?;
@@ -21,7 +17,12 @@ fn main() -> Result<()> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
-    gpui_platform::application().run(|cx: &mut App| {
+    // Replaced by `--open` once opening files is implemented.
+    let path = std::env::args_os().nth(1).map(PathBuf::from);
+
+    gpui_platform::application().run(move |cx: &mut App| {
+        cx.bind_keys([KeyBinding::new("ctrl-0", ResetView, None)]);
+
         let options = WindowOptions {
             titlebar: Some(TitlebarOptions {
                 title: Some("deltaflens".into()),
@@ -34,7 +35,18 @@ fn main() -> Result<()> {
             ))),
             ..Default::default()
         };
-        if let Err(error) = cx.open_window(options, |_, cx| cx.new(|_| RootView)) {
+        let result = cx.open_window(options, |window, cx| {
+            cx.new(|cx| {
+                let mut view = WorkspaceView::new(window, cx);
+                if let Some(path) = path
+                    && let Err(error) = view.open_in_new_tab(path, window, cx)
+                {
+                    tracing::error!("{error:#}");
+                }
+                view
+            })
+        });
+        if let Err(error) = result {
             tracing::error!("failed to open window: {error:#}");
             cx.quit();
         }

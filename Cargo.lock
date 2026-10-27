@@ -1137,6 +1137,7 @@ dependencies = [
  "eyre",
  "gpui",
  "gpui_platform",
+ "image",
  "tracing",
  "tracing-subscriber",
 ]
