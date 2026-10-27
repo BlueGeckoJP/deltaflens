@@ -9,7 +9,7 @@ use gpui::{
 };
 use tracing_subscriber::EnvFilter;
 
-use crate::workspace_view::{ResetView, WorkspaceView};
+use crate::workspace_view::{NextImage, PreviousImage, ResetView, WorkspaceView};
 
 fn main() -> Result<()> {
     color_eyre::install()?;
@@ -21,11 +21,15 @@ fn main() -> Result<()> {
     let path = std::env::args_os().nth(1).map(PathBuf::from);
 
     gpui_platform::application().run(move |cx: &mut App| {
-        cx.bind_keys([KeyBinding::new("ctrl-0", ResetView, None)]);
+        cx.bind_keys([
+            KeyBinding::new("ctrl-0", ResetView, None),
+            KeyBinding::new("left", PreviousImage, None),
+            KeyBinding::new("right", NextImage, None),
+        ]);
 
         let options = WindowOptions {
             titlebar: Some(TitlebarOptions {
-                title: Some("deltaflens".into()),
+                title: Some(workspace_view::APP_NAME.into()),
                 ..Default::default()
             }),
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(

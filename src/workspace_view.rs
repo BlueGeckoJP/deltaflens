@@ -1,6 +1,6 @@
 use std::{collections::HashMap, path::PathBuf};
 
-use deltaflens_core::{Axis, Layout, PaneId, TabContent, TabId, Workspace};
+use deltaflens_core::{Axis, Direction, Layout, PaneId, Tab, TabContent, TabId, Workspace};
 use eyre::Result;
 use gpui::{
     AnyElement, Context, Entity, FocusHandle, Window, actions, div, prelude::*, relative, rgb,
@@ -8,7 +8,9 @@ use gpui::{
 
 use crate::viewer::Viewer;
 
-actions!(deltaflens, [ResetView]);
+actions!(deltaflens, [ResetView, PreviousImage, NextImage]);
+
+pub const APP_NAME: &str = "deltaflens";
 
 /// The content of a window: renders the core [`Workspace`] and keeps the UI
 /// state of each tab.
@@ -16,6 +18,8 @@ pub struct WorkspaceView {
     workspace: Workspace,
     viewers: HashMap<TabId, Entity<Viewer>>,
     focus_handle: FocusHandle,
+    /// The window title last set, to avoid setting it on every frame.
+    title: String,
 }
 
 impl WorkspaceView {
@@ -26,6 +30,7 @@ impl WorkspaceView {
             workspace: Workspace::new(),
             viewers: HashMap::new(),
             focus_handle,
+            title: APP_NAME.to_owned(),
         }
     }
 
@@ -46,14 +51,72 @@ impl WorkspaceView {
         Ok(())
     }
 
+    fn active_tab(&self) -> Option<&Tab> {
+        self.workspace
+            .pane(self.workspace.focused_pane())
+            .ok()?
+            .active_tab()
+    }
+
     fn active_viewer(&self) -> Option<&Entity<Viewer>> {
-        let pane = self.workspace.pane(self.workspace.focused_pane()).ok()?;
-        self.viewers.get(&pane.active_tab()?.id())
+        self.viewers.get(&self.active_tab()?.id())
     }
 
     fn reset_view(&mut self, _: &ResetView, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(viewer) = self.active_viewer() {
             viewer.update(cx, Viewer::reset_view);
+        }
+    }
+
+    fn previous_image(&mut self, _: &PreviousImage, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_in_folder(Direction::Previous, window, cx);
+    }
+
+    fn next_image(&mut self, _: &NextImage, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_in_folder(Direction::Next, window, cx);
+    }
+
+    /// Shows the previous or next image of the folder in the active tab.
+    fn move_in_folder(
+        &mut self,
+        direction: Direction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab_id) = self.active_tab().map(Tab::id) else {
+            return;
+        };
+        let Some(viewer) = self.viewers.get(&tab_id).cloned() else {
+            return;
+        };
+        let Some(path) = viewer.read(cx).neighbor(direction) else {
+            return;
+        };
+        let content = TabContent::Viewer { path: path.clone() };
+        let result = self
+            .workspace
+            .pane_mut(self.workspace.focused_pane())
+            .and_then(|pane| pane.set_tab_content(tab_id, content));
+        if let Err(error) = result {
+            tracing::error!("{error:#}");
+            return;
+        }
+        viewer.update(cx, |viewer, cx| viewer.load(path, window, cx));
+        cx.notify();
+    }
+
+    /// Shows the file name of the active tab in the window title.
+    fn update_title(&mut self, window: &mut Window) {
+        let title = match self.active_tab().map(Tab::content) {
+            Some(TabContent::Viewer { path }) => match path.file_name() {
+                Some(name) => format!("{} - {APP_NAME}", name.to_string_lossy()),
+                None => APP_NAME.to_owned(),
+            },
+            None => APP_NAME.to_owned(),
+        };
+        if title != self.title {
+            window.set_window_title(&title);
+            self.title = title;
         }
     }
 
@@ -90,12 +153,15 @@ impl WorkspaceView {
 }
 
 impl Render for WorkspaceView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.update_title(window);
         div()
             .size_full()
             .bg(rgb(0x1e_1e_1e))
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::reset_view))
+            .on_action(cx.listener(Self::previous_image))
+            .on_action(cx.listener(Self::next_image))
             .child(self.render_layout(self.workspace.layout()))
     }
 }

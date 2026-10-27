@@ -1,6 +1,11 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
-use deltaflens_core::{DecodedImage, ViewTransform, decode};
+use deltaflens_core::{
+    DecodedImage, Direction, ViewTransform, decode, list_images, neighbor_image,
+};
 use eyre::{Result, eyre};
 use gpui::{
     Bounds, Context, CursorStyle, DispatchPhase, MouseButton, MouseDownEvent, MouseMoveEvent,
@@ -29,6 +34,15 @@ pub struct Viewer {
     drag_position: Option<gpui::Point<Pixels>>,
     /// Dropping it cancels the load, so that only the latest path is shown.
     load_task: Option<Task<()>>,
+    /// The images in the folder of `path`, reused while moving within it.
+    folder: Option<Folder>,
+    /// The folder being listed, if any.
+    folder_task: Option<(PathBuf, Task<()>)>,
+}
+
+struct Folder {
+    dir: PathBuf,
+    images: Vec<PathBuf>,
 }
 
 impl Viewer {
@@ -48,6 +62,8 @@ impl Viewer {
             viewport: None,
             drag_position: None,
             load_task: None,
+            folder: None,
+            folder_task: None,
         };
         this.load(path, window, cx);
         this
@@ -57,6 +73,7 @@ impl Viewer {
     /// image stays visible until then.
     pub fn load(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         self.path.clone_from(&path);
+        self.list_folder(cx);
         self.load_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_spawn(async move { decode(&path).and_then(to_render_image) })
@@ -66,6 +83,52 @@ impl Viewer {
                 this.finish_load(result, window, cx);
             });
         }));
+    }
+
+    /// Lists the folder of `path` in the background, unless it is already
+    /// listed or being listed.
+    fn list_folder(&mut self, cx: &mut Context<Self>) {
+        let Some(dir) = self.path.parent() else {
+            return;
+        };
+        let listed = self.folder.as_ref().is_some_and(|folder| folder.dir == dir);
+        let listing = self
+            .folder_task
+            .as_ref()
+            .is_some_and(|(listing_dir, _)| listing_dir == dir);
+        if listed || listing {
+            return;
+        }
+        let dir = dir.to_path_buf();
+        let task = cx.spawn({
+            let dir = dir.clone();
+            async move |this, cx| {
+                let result = cx
+                    .background_spawn({
+                        let dir = dir.clone();
+                        async move { list_images(&dir) }
+                    })
+                    .await;
+                let _ = this.update(cx, |this, _| {
+                    this.folder_task = None;
+                    match result {
+                        Ok(images) => this.folder = Some(Folder { dir, images }),
+                        Err(error) => tracing::warn!("{error:#}"),
+                    }
+                });
+            }
+        });
+        self.folder_task = Some((dir, task));
+    }
+
+    /// The image next to the current one in its folder, once the folder is
+    /// listed.
+    pub fn neighbor(&self, direction: Direction) -> Option<PathBuf> {
+        let folder = self.folder.as_ref()?;
+        if Some(folder.dir.as_path()) != self.path.parent() {
+            return None;
+        }
+        neighbor_image(&folder.images, &self.path, direction).map(Path::to_path_buf)
     }
 
     fn finish_load(

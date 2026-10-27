@@ -27,4 +27,8 @@ impl Tab {
     pub fn content(&self) -> &TabContent {
         &self.content
     }
+
+    pub(crate) fn set_content(&mut self, content: TabContent) {
+        self.content = content;
+    }
 }

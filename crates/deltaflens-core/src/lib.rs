@@ -3,6 +3,7 @@
 //! This crate must not depend on gpui.
 
 mod decode;
+mod folder;
 mod id;
 mod layout;
 mod pane;
@@ -11,6 +12,7 @@ mod view;
 mod workspace;
 
 pub use decode::{DecodedImage, decode, is_supported_image};
+pub use folder::{Direction, list_images, neighbor_image};
 pub use id::{PaneId, TabId};
 pub use layout::{Axis, Layout};
 pub use pane::Pane;
