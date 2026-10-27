@@ -11,7 +11,10 @@ use gpui::{
 };
 use tracing_subscriber::EnvFilter;
 
-use crate::workspace_view::{NextImage, Open, PreviousImage, ResetView, WorkspaceView};
+use crate::workspace_view::{
+    ActivateNextTab, ActivatePreviousTab, CloseTab, NewTab, NextImage, Open, PreviousImage,
+    ResetView, WorkspaceView,
+};
 
 actions!(deltaflens, [Quit]);
 
@@ -41,6 +44,10 @@ fn main() -> Result<()> {
         .detach();
         cx.bind_keys([
             KeyBinding::new("ctrl-o", Open, None),
+            KeyBinding::new("ctrl-n", NewTab, None),
+            KeyBinding::new("ctrl-w", CloseTab, None),
+            KeyBinding::new("ctrl-tab", ActivateNextTab, None),
+            KeyBinding::new("ctrl-shift-tab", ActivatePreviousTab, None),
             KeyBinding::new("ctrl-q", Quit, None),
             KeyBinding::new("ctrl-0", ResetView, None),
             KeyBinding::new("left", PreviousImage, None),
@@ -62,10 +69,8 @@ fn main() -> Result<()> {
         let result = cx.open_window(options, |window, cx| {
             cx.new(|cx| {
                 let mut view = WorkspaceView::new(window, cx);
-                if let Some(path) = args.open
-                    && let Err(error) = view.open_in_new_tab(path, window, cx)
-                {
-                    tracing::error!("{error:#}");
+                if let Some(path) = args.open {
+                    view.open_in_new_tab(path, window, cx);
                 }
                 view
             })
