@@ -220,27 +220,35 @@ impl Viewer {
         }
         let made = wanted
             .as_ref()
-            .and_then(|key| self.images.update(cx, |images, _| images.get(key)));
-        if wanted.is_none() || made.is_some() {
-            self.downscale_task = None;
-            self.wanted_downscaled.clone_from(&wanted);
-            self.downscaled = wanted.zip(made);
-            self.request(cx);
-            cx.notify();
+            .is_some_and(|key| self.images.read(cx).contains(key));
+        if wanted.is_none() || made {
+            self.want_downscaled(wanted, cx);
             return;
         }
         let task = cx.spawn({
             let wanted = wanted.clone();
             async move |this, cx| {
                 cx.background_executor().timer(DOWNSCALE_DELAY).await;
-                let _ = this.update(cx, |this, cx| {
-                    this.downscale_task = None;
-                    this.wanted_downscaled = wanted;
-                    this.request(cx);
-                });
+                let _ = this.update(cx, |this, cx| this.want_downscaled(wanted, cx));
             }
         });
         self.downscale_task = Some((wanted, task));
+    }
+
+    /// Asks for the smaller version of `wanted`, or for none. One made
+    /// already, such as by another viewer while waiting, is used at once, as
+    /// no event tells of it.
+    fn want_downscaled(&mut self, wanted: Option<ImageKey>, cx: &mut Context<Self>) {
+        self.downscale_task = None;
+        let made = wanted
+            .as_ref()
+            .and_then(|key| self.images.update(cx, |images, _| images.get(key)));
+        if wanted.is_none() || made.is_some() {
+            self.downscaled = wanted.clone().zip(made);
+            cx.notify();
+        }
+        self.wanted_downscaled = wanted;
+        self.request(cx);
     }
 
     /// The key of the smaller version of the current image for the scale it is
@@ -402,8 +410,7 @@ impl Viewer {
         let image = match &self.downscaled {
             Some((downscaled_key, downscaled))
                 if downscaled_key.original() == *key
-                    && image_size(downscaled, window.scale_factor()).width + 0.5
-                        >= rect.size.width =>
+                    && covers(image_size(downscaled, window.scale_factor()), rect.size) =>
             {
                 downscaled
             }
@@ -504,6 +511,13 @@ fn image_size(image: &RenderImage, scale_factor: f32) -> deltaflens_core::Size {
     }
 }
 
+/// Whether an image of `size` has at least as many pixels as `shown`, both in
+/// logical pixels, so that drawing it there does not enlarge it. Both sides
+/// count, as rounding can leave one side of a thin image far too short.
+fn covers(size: deltaflens_core::Size, shown: deltaflens_core::Size) -> bool {
+    size.width + 0.5 >= shown.width && size.height + 0.5 >= shown.height
+}
+
 fn to_core_size(size: gpui::Size<Pixels>) -> deltaflens_core::Size {
     deltaflens_core::Size {
         width: size.width.into(),
@@ -515,5 +529,30 @@ fn to_core_point(point: gpui::Point<Pixels>) -> deltaflens_core::Point {
     deltaflens_core::Point {
         x: point.x.into(),
         y: point.y.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use deltaflens_core::Size;
+
+    use super::*;
+
+    fn size(width: f32, height: f32) -> Size {
+        Size { width, height }
+    }
+
+    #[test]
+    fn image_as_large_as_shown_covers_it() {
+        assert!(covers(size(960., 540.), size(960., 540.)));
+        // Rounding the size of a downscaled image.
+        assert!(covers(size(960., 540.), size(960.4, 540.3)));
+        assert!(!covers(size(960., 540.), size(1000., 562.5)));
+    }
+
+    #[test]
+    fn thin_image_needs_both_sides() {
+        // The 1 x 8192 overview of a 1 x 10000 image, shown at its size.
+        assert!(!covers(size(1., 8192.), size(1., 10_000.)));
     }
 }

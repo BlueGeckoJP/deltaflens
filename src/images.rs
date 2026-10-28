@@ -130,6 +130,11 @@ impl Images {
         self.cache.get(key).cloned()
     }
 
+    #[must_use]
+    pub fn contains(&self, key: &ImageKey) -> bool {
+        self.cache.contains(key)
+    }
+
     /// Why the image could not be decoded, if it could not.
     #[must_use]
     pub fn error(&self, key: &ImageKey) -> Option<SharedString> {
