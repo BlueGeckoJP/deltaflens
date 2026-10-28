@@ -288,6 +288,100 @@ impl Layout {
         best.map(|(id, _, _)| id)
     }
 
+    /// The split reached by following `path`, the indices of the children
+    /// from the root.
+    fn node_mut(&mut self, path: &[usize]) -> Option<&mut Layout> {
+        let Some((first, rest)) = path.split_first() else {
+            return Some(self);
+        };
+        match self {
+            Layout::Pane(_) => None,
+            Layout::Split { children, .. } => children.get_mut(*first)?.0.node_mut(rest),
+        }
+    }
+
+    /// The smallest size of the layout along `axis`, in the same unit as
+    /// `min_pane`, with which every pane keeps at least `min_pane`.
+    ///
+    /// The children of a split grow and shrink with it, so a child with a small
+    /// ratio needs the split to be large.
+    #[must_use]
+    pub fn min_extent(&self, axis: Axis, min_pane: f32) -> f32 {
+        match self {
+            Layout::Pane(_) => min_pane,
+            Layout::Split {
+                axis: split_axis,
+                children,
+            } if *split_axis == axis => children
+                .iter()
+                .map(|(child, ratio)| child.min_extent(axis, min_pane) / ratio.max(f32::EPSILON))
+                .fold(0., f32::max),
+            Layout::Split { children, .. } => children
+                .iter()
+                .map(|(child, _)| child.min_extent(axis, min_pane))
+                .fold(0., f32::max),
+        }
+    }
+
+    /// Moves the boundary after child `boundary` of the split at `path` to
+    /// `offset` from the start of the split, which is `extent` long along its
+    /// axis. Only the two children next to the boundary change. Each keeps the
+    /// size that its panes need to be at least `min_pane`; if the two cannot
+    /// both keep it, nothing changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there is no split at `path`, or no boundary after
+    /// child `boundary`.
+    pub fn move_boundary(
+        &mut self,
+        path: &[usize],
+        boundary: usize,
+        offset: f32,
+        extent: f32,
+        min_pane: f32,
+    ) -> Result<()> {
+        let Some(Layout::Split { axis, children }) = self.node_mut(path) else {
+            return Err(eyre!("no split at {path:?}"));
+        };
+        let axis = *axis;
+        if boundary + 1 >= children.len() {
+            return Err(eyre!("no boundary after child {boundary}"));
+        }
+        if extent <= 0. {
+            return Ok(());
+        }
+        let start: f32 = children[..boundary].iter().map(|(_, ratio)| ratio).sum();
+        let pair = children[boundary].1 + children[boundary + 1].1;
+        let min_before = children[boundary].0.min_extent(axis, min_pane) / extent;
+        let min_after = children[boundary + 1].0.min_extent(axis, min_pane) / extent;
+        if min_before + min_after > pair {
+            return Ok(());
+        }
+        let before = (offset / extent - start).clamp(min_before, pair - min_after);
+        children[boundary].1 = before;
+        children[boundary + 1].1 = pair - before;
+        Ok(())
+    }
+
+    /// Gives every child of the split at `path` the same ratio.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there is no split at `path`.
+    pub fn equalize(&mut self, path: &[usize]) -> Result<()> {
+        let Some(Layout::Split { children, .. }) = self.node_mut(path) else {
+            return Err(eyre!("no split at {path:?}"));
+        };
+        // A split has only a few children.
+        #[expect(clippy::cast_precision_loss)]
+        let ratio = 1. / children.len() as f32;
+        for (_, child_ratio) in children {
+            *child_ratio = ratio;
+        }
+        Ok(())
+    }
+
     /// Returns the IDs of the panes that touch the top edge of the layout, from
     /// left to right.
     #[must_use]
@@ -547,6 +641,121 @@ mod tests {
             ],
         );
         assert_eq!(layout.neighbor(PaneId(0), Side::Right), Some(PaneId(2)));
+    }
+
+    fn ratios(layout: &Layout) -> Vec<f32> {
+        match layout {
+            Layout::Pane(_) => Vec::new(),
+            Layout::Split { children, .. } => children.iter().map(|(_, ratio)| *ratio).collect(),
+        }
+    }
+
+    fn assert_ratios(actual: &[f32], expected: &[f32]) {
+        assert_eq!(actual.len(), expected.len(), "{actual:?}");
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-5, "{actual} != {expected}");
+        }
+    }
+
+    #[test]
+    fn min_extent_of_nested_splits() {
+        // 0 | 1 with 1 split 1 / 2: across, both columns need 100; along the
+        // stacked side, the column needs only one pane's worth.
+        let layout = right_side_stacked();
+        assert!((layout.min_extent(Axis::Horizontal, 100.) - 200.).abs() < 1e-3);
+        assert!((layout.min_extent(Axis::Vertical, 100.) - 200.).abs() < 1e-3);
+        let column = split(Axis::Vertical, vec![(pane(1), 0.25), (pane(2), 0.75)]);
+        assert!((column.min_extent(Axis::Vertical, 100.) - 400.).abs() < 1e-3);
+        assert!((column.min_extent(Axis::Horizontal, 100.) - 100.).abs() < 1e-3);
+    }
+
+    #[test]
+    fn move_boundary_changes_the_two_neighbors() {
+        let mut layout = split(
+            Axis::Horizontal,
+            vec![(pane(0), 0.25), (pane(1), 0.25), (pane(2), 0.5)],
+        );
+        layout.move_boundary(&[], 0, 400., 1000., 50.).unwrap();
+        assert_ratios(&ratios(&layout), &[0.4, 0.1, 0.5]);
+    }
+
+    #[test]
+    fn move_boundary_keeps_the_minimum_size() {
+        let mut layout = split(Axis::Horizontal, vec![(pane(0), 0.5), (pane(1), 0.5)]);
+        layout.move_boundary(&[], 0, 990., 1000., 100.).unwrap();
+        assert_ratios(&ratios(&layout), &[0.9, 0.1]);
+        layout.move_boundary(&[], 0, -50., 1000., 100.).unwrap();
+        assert_ratios(&ratios(&layout), &[0.1, 0.9]);
+    }
+
+    #[test]
+    fn move_boundary_keeps_the_minimum_of_nested_panes() {
+        // The right column is a vertical split, which needs only one pane's
+        // worth across.
+        let mut layout = right_side_stacked();
+        layout.move_boundary(&[], 0, 950., 1000., 100.).unwrap();
+        assert_ratios(&ratios(&layout), &[0.9, 0.1]);
+    }
+
+    #[test]
+    fn move_boundary_in_a_nested_split() {
+        let mut layout = right_side_stacked();
+        layout.move_boundary(&[1], 0, 300., 1000., 100.).unwrap();
+        let Layout::Split { children, .. } = &layout else {
+            panic!("not a split");
+        };
+        assert_ratios(&ratios(&children[1].0), &[0.3, 0.7]);
+        assert_ratios(&ratios(&layout), &[0.5, 0.5]);
+    }
+
+    #[test]
+    fn move_boundary_without_room_changes_nothing() {
+        let mut layout = split(Axis::Horizontal, vec![(pane(0), 0.5), (pane(1), 0.5)]);
+        layout.move_boundary(&[], 0, 100., 150., 100.).unwrap();
+        assert_ratios(&ratios(&layout), &[0.5, 0.5]);
+    }
+
+    #[test]
+    fn move_missing_boundary_fails() {
+        let mut layout = split(Axis::Horizontal, vec![(pane(0), 0.5), (pane(1), 0.5)]);
+        assert!(layout.move_boundary(&[], 1, 100., 1000., 10.).is_err());
+        assert!(layout.move_boundary(&[0], 0, 100., 1000., 10.).is_err());
+        assert!(pane(0).move_boundary(&[], 0, 100., 1000., 10.).is_err());
+    }
+
+    #[test]
+    fn equalize_gives_every_child_the_same_ratio() {
+        let mut layout = split(
+            Axis::Horizontal,
+            vec![(pane(0), 0.2), (pane(1), 0.3), (pane(2), 0.5)],
+        );
+        layout.equalize(&[]).unwrap();
+        assert_ratios(&ratios(&layout), &[1. / 3., 1. / 3., 1. / 3.]);
+    }
+
+    #[test]
+    fn equalize_nested_split_leaves_the_parent() {
+        let mut layout = split(
+            Axis::Horizontal,
+            vec![
+                (pane(0), 0.7),
+                (
+                    split(Axis::Vertical, vec![(pane(1), 0.2), (pane(2), 0.8)]),
+                    0.3,
+                ),
+            ],
+        );
+        layout.equalize(&[1]).unwrap();
+        let Layout::Split { children, .. } = &layout else {
+            panic!("not a split");
+        };
+        assert_ratios(&ratios(&children[1].0), &[0.5, 0.5]);
+        assert_ratios(&ratios(&layout), &[0.7, 0.3]);
+    }
+
+    #[test]
+    fn equalize_pane_fails() {
+        assert!(pane(0).equalize(&[]).is_err());
     }
 
     #[test]

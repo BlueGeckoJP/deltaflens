@@ -6,9 +6,9 @@ use std::{
 use deltaflens_core::{Axis, Direction, Layout, PaneId, Side, Tab, TabContent, TabId, Workspace};
 use eyre::{Result, eyre};
 use gpui::{
-    AnyElement, ClickEvent, Context, ElementId, Entity, FocusHandle, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, Window, actions, anchored,
-    deferred, div, prelude::*, px, relative, rgb,
+    AnyElement, ClickEvent, Context, CursorStyle, DragMoveEvent, ElementId, Entity, FocusHandle,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point,
+    Window, actions, anchored, deferred, div, prelude::*, px, relative, rgb,
 };
 
 use crate::{
@@ -53,6 +53,28 @@ const MIN_DRAG_WIDTH: Pixels = px(48.);
 const FOCUS_COLOR: u32 = 0x5b_9b_e0;
 /// The color of the lines between panes.
 const DIVIDER_COLOR: u32 = 0x2a_2a_2a;
+/// The width of the area around a line between panes that can be dragged.
+const DIVIDER_HANDLE_WIDTH: Pixels = px(6.);
+/// The smallest width and height of a pane when dragging a line between panes.
+const MIN_PANE_SIZE: f32 = 120.;
+
+/// A line between two children of a split, being dragged.
+struct DraggedDivider {
+    /// The indices of the children from the root to the split.
+    path: Vec<usize>,
+    /// The line is after this child.
+    boundary: usize,
+}
+
+/// What follows the mouse while dragging. Nothing is drawn for a line between
+/// panes.
+struct DragPreview;
+
+impl Render for DragPreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
 
 /// The menu opened by right-clicking a tab.
 struct TabMenu {
@@ -561,9 +583,11 @@ impl WorkspaceView {
             .collect()
     }
 
+    /// `path` is the indices of the children from the root to `layout`.
     fn render_layout(
         &self,
         layout: &Layout,
+        path: &[usize],
         title_bar: &HashMap<PaneId, TitleBarPart>,
         window: &Window,
         cx: &mut Context<Self>,
@@ -573,30 +597,130 @@ impl WorkspaceView {
                 let part = title_bar.get(pane_id).copied();
                 self.render_pane(*pane_id, part, window, cx)
             }
-            Layout::Split { axis, children } => div()
-                .size_full()
-                .flex()
-                .when(*axis == Axis::Vertical, Styled::flex_col)
-                .children(children.iter().enumerate().map(|(index, (child, ratio))| {
-                    let cell = div()
-                        .overflow_hidden()
-                        .border_color(rgb(DIVIDER_COLOR))
-                        .child(self.render_layout(child, title_bar, window, cx));
-                    // A line on the leading side of every child but the first.
-                    let has_divider = index > 0;
-                    match axis {
-                        Axis::Horizontal => cell
-                            .h_full()
-                            .w(relative(*ratio))
-                            .when(has_divider, Styled::border_l_1),
-                        Axis::Vertical => cell
-                            .w_full()
-                            .h(relative(*ratio))
-                            .when(has_divider, Styled::border_t_1),
-                    }
-                }))
-                .into_any_element(),
+            Layout::Split { axis, children } => {
+                let axis = *axis;
+                // A line after every child but the last.
+                let mut offset = 0.;
+                let mut dividers = Vec::new();
+                for (boundary, (_, ratio)) in children
+                    .iter()
+                    .enumerate()
+                    .take(children.len().saturating_sub(1))
+                {
+                    offset += ratio;
+                    dividers.push(Self::render_divider(path, boundary, axis, offset, cx));
+                }
+                let split_path = path.to_vec();
+                div()
+                    .id(ElementId::Name(format!("split-{path:?}").into()))
+                    .size_full()
+                    .relative()
+                    .flex()
+                    .when(axis == Axis::Vertical, Styled::flex_col)
+                    .on_drag_move(cx.listener(
+                        move |this, event: &DragMoveEvent<DraggedDivider>, _, cx| {
+                            let Some(divider) =
+                                event.dragged_item().downcast_ref::<DraggedDivider>()
+                            else {
+                                return;
+                            };
+                            if divider.path != split_path {
+                                return;
+                            }
+                            let position = event.event.position - event.bounds.origin;
+                            let (offset, extent) = match axis {
+                                Axis::Horizontal => (position.x, event.bounds.size.width),
+                                Axis::Vertical => (position.y, event.bounds.size.height),
+                            };
+                            let result = this.workspace.move_boundary(
+                                &split_path,
+                                divider.boundary,
+                                f32::from(offset),
+                                f32::from(extent),
+                                MIN_PANE_SIZE,
+                            );
+                            if let Err(error) = result {
+                                tracing::error!("{error:#}");
+                            }
+                            cx.notify();
+                        },
+                    ))
+                    .children(children.iter().enumerate().map(|(index, (child, ratio))| {
+                        let mut child_path = path.to_vec();
+                        child_path.push(index);
+                        let cell = div()
+                            .overflow_hidden()
+                            .border_color(rgb(DIVIDER_COLOR))
+                            .child(self.render_layout(child, &child_path, title_bar, window, cx));
+                        // A line on the leading side of every child but the first.
+                        let has_divider = index > 0;
+                        match axis {
+                            Axis::Horizontal => cell
+                                .h_full()
+                                .w(relative(*ratio))
+                                .when(has_divider, Styled::border_l_1),
+                            Axis::Vertical => cell
+                                .w_full()
+                                .h(relative(*ratio))
+                                .when(has_divider, Styled::border_t_1),
+                        }
+                    }))
+                    .children(dividers)
+                    .into_any_element()
+            }
         }
+    }
+
+    /// The area around the line after child `boundary` of the split at `path`,
+    /// at `offset` (a ratio of the split) from its start. Dragging it resizes
+    /// the two children next to it, and double-clicking it gives every child
+    /// the same size.
+    fn render_divider(
+        path: &[usize],
+        boundary: usize,
+        axis: Axis,
+        offset: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let dragged = DraggedDivider {
+            path: path.to_vec(),
+            boundary,
+        };
+        let equalize_path = path.to_vec();
+        let handle = div()
+            .id(ElementId::Name(
+                format!("divider-{path:?}-{boundary}").into(),
+            ))
+            .absolute()
+            .hover(|style| style.bg(rgb(FOCUS_COLOR)))
+            .on_drag(dragged, |_, _, _, cx| cx.new(|_| DragPreview))
+            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                if event.click_count() == 2 {
+                    if let Err(error) = this.workspace.equalize(&equalize_path) {
+                        tracing::error!("{error:#}");
+                    }
+                    cx.notify();
+                }
+            }));
+        // Centered on the line.
+        let half = -DIVIDER_HANDLE_WIDTH / 2.;
+        match axis {
+            Axis::Horizontal => handle
+                .top_0()
+                .h_full()
+                .left(relative(offset))
+                .ml(half)
+                .w(DIVIDER_HANDLE_WIDTH)
+                .cursor(CursorStyle::ResizeLeftRight),
+            Axis::Vertical => handle
+                .left_0()
+                .w_full()
+                .top(relative(offset))
+                .mt(half)
+                .h(DIVIDER_HANDLE_WIDTH)
+                .cursor(CursorStyle::ResizeUpDown),
+        }
+        .into_any_element()
     }
 
     fn render_pane(
@@ -837,7 +961,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::focus_pane_right))
             .on_action(cx.listener(Self::focus_pane_up))
             .on_action(cx.listener(Self::focus_pane_down))
-            .child(self.render_layout(self.workspace.layout(), &title_bar, window, cx))
+            .child(self.render_layout(self.workspace.layout(), &[], &title_bar, window, cx))
             .when_some(self.tab_menu.as_ref(), |this, menu| {
                 this.child(
                     deferred(

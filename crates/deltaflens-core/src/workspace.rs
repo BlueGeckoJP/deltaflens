@@ -110,6 +110,33 @@ impl Workspace {
         Ok(())
     }
 
+    /// See [`Layout::move_boundary`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there is no split at `path`, or no boundary after
+    /// child `boundary`.
+    pub fn move_boundary(
+        &mut self,
+        path: &[usize],
+        boundary: usize,
+        offset: f32,
+        extent: f32,
+        min_pane: f32,
+    ) -> Result<()> {
+        self.layout
+            .move_boundary(path, boundary, offset, extent, min_pane)
+    }
+
+    /// See [`Layout::equalize`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there is no split at `path`.
+    pub fn equalize(&mut self, path: &[usize]) -> Result<()> {
+        self.layout.equalize(path)
+    }
+
     /// Focuses the pane next to the focused pane on `side`. Returns whether
     /// there was one.
     pub fn focus_neighbor(&mut self, side: Side) -> bool {
