@@ -1,3 +1,4 @@
+mod explorer;
 mod viewer;
 mod workspace_view;
 
@@ -12,8 +13,8 @@ use gpui::{
 use tracing_subscriber::EnvFilter;
 
 use crate::workspace_view::{
-    ActivateNextTab, ActivatePreviousTab, CloseTab, NewTab, NextImage, Open, PreviousImage,
-    ResetView, WorkspaceView,
+    ActivateNextTab, ActivatePreviousTab, CloseTab, GoBack, GoForward, GoUp, NewTab, NextImage,
+    Open, PreviousImage, ResetView, WorkspaceView,
 };
 
 actions!(deltaflens, [Quit]);
@@ -22,7 +23,7 @@ actions!(deltaflens, [Quit]);
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Args {
-    /// Image to open.
+    /// Image or folder to open. Without it, the working directory is opened.
     #[arg(long, value_name = "PATH")]
     open: Option<PathBuf>,
 }
@@ -52,6 +53,9 @@ fn main() -> Result<()> {
             KeyBinding::new("ctrl-0", ResetView, None),
             KeyBinding::new("left", PreviousImage, None),
             KeyBinding::new("right", NextImage, None),
+            KeyBinding::new("alt-left", GoBack, None),
+            KeyBinding::new("alt-right", GoForward, None),
+            KeyBinding::new("alt-up", GoUp, None),
         ]);
 
         let options = WindowOptions {
@@ -69,8 +73,10 @@ fn main() -> Result<()> {
         let result = cx.open_window(options, |window, cx| {
             cx.new(|cx| {
                 let mut view = WorkspaceView::new(window, cx);
-                if let Some(path) = args.open {
-                    view.open_in_new_tab(path, window, cx);
+                if let Some(path) = args.open.or_else(workspace_view::default_dir) {
+                    view.open_path(path, window, cx);
+                } else {
+                    tracing::error!("no folder to open: the working directory is unknown");
                 }
                 view
             })

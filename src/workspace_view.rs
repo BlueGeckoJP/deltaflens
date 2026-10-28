@@ -1,13 +1,19 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use deltaflens_core::{Axis, Direction, Layout, PaneId, Tab, TabContent, TabId, Workspace};
-use eyre::Result;
+use eyre::{Result, eyre};
 use gpui::{
     AnyElement, ClickEvent, Context, ElementId, Entity, FocusHandle, MouseButton, MouseUpEvent,
     PathPromptOptions, Window, actions, div, prelude::*, px, relative, rgb,
 };
 
-use crate::viewer::Viewer;
+use crate::{
+    explorer::{Explorer, ExplorerEvent},
+    viewer::Viewer,
+};
 
 actions!(
     deltaflens,
@@ -20,16 +26,34 @@ actions!(
         ResetView,
         PreviousImage,
         NextImage,
+        GoBack,
+        GoForward,
+        GoUp,
     ]
 );
 
 pub const APP_NAME: &str = "deltaflens";
 
+/// The UI state of a tab.
+enum TabView {
+    Viewer(Entity<Viewer>),
+    Explorer(Entity<Explorer>),
+}
+
+impl TabView {
+    fn to_element(&self) -> AnyElement {
+        match self {
+            Self::Viewer(viewer) => viewer.clone().into_any_element(),
+            Self::Explorer(explorer) => explorer.clone().into_any_element(),
+        }
+    }
+}
+
 /// The content of a window: renders the core [`Workspace`] and keeps the UI
 /// state of each tab.
 pub struct WorkspaceView {
     workspace: Workspace,
-    viewers: HashMap<TabId, Entity<Viewer>>,
+    views: HashMap<TabId, TabView>,
     focus_handle: FocusHandle,
     /// The window title last set, to avoid setting it on every frame.
     title: String,
@@ -41,54 +65,115 @@ impl WorkspaceView {
         window.focus(&focus_handle, cx);
         Self {
             workspace: Workspace::new(),
-            viewers: HashMap::new(),
+            views: HashMap::new(),
             focus_handle,
             title: APP_NAME.to_owned(),
         }
     }
 
-    /// Opens `path` in a new tab of the focused pane.
-    pub fn open_in_new_tab(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    /// Opens `path` in a new tab of the focused pane: an explorer for a folder,
+    /// a viewer otherwise.
+    pub fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        // The explorer moves up and shows the path bar from an absolute path.
+        let path = std::path::absolute(&path).unwrap_or(path);
+        let content = if path.is_dir() {
+            TabContent::Explorer { dir: path }
+        } else {
+            TabContent::Viewer { path }
+        };
+        self.open_tab(content, window, cx);
+    }
+
+    /// Opens a new tab in the focused pane, to the right of its active tab.
+    fn open_tab(&mut self, content: TabContent, window: &mut Window, cx: &mut Context<Self>) {
         let pane_id = self.workspace.focused_pane();
-        let content = TabContent::Viewer { path: path.clone() };
-        match self.workspace.open_tab(pane_id, content) {
-            Ok(tab_id) => {
-                let viewer = cx.new(|cx| Viewer::new(path, window, cx));
-                self.viewers.insert(tab_id, viewer);
+        let tab_id = match self.workspace.open_tab(pane_id, content.clone()) {
+            Ok(tab_id) => tab_id,
+            Err(error) => {
+                tracing::error!("{error:#}");
+                return;
+            }
+        };
+        let view = match content {
+            TabContent::Viewer { path } => {
+                TabView::Viewer(cx.new(|cx| Viewer::new(path, window, cx)))
+            }
+            TabContent::Explorer { dir } => {
+                let explorer = cx.new(|cx| Explorer::new(dir, cx));
+                cx.subscribe_in(&explorer, window, move |this, _, event, window, cx| {
+                    this.on_explorer_event(tab_id, event, window, cx);
+                })
+                .detach();
+                TabView::Explorer(explorer)
+            }
+        };
+        self.views.insert(tab_id, view);
+        cx.notify();
+    }
+
+    fn on_explorer_event(
+        &mut self,
+        tab_id: TabId,
+        event: &ExplorerEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ExplorerEvent::Navigated(dir) => {
+                let content = TabContent::Explorer { dir: dir.clone() };
+                if let Err(error) = self.set_tab_content(tab_id, content) {
+                    tracing::error!("{error:#}");
+                }
                 cx.notify();
             }
-            Err(error) => tracing::error!("{error:#}"),
+            ExplorerEvent::OpenImage(path) => {
+                // Open next to the explorer, in its pane.
+                if let Some(pane_id) = self.workspace.pane_of_tab(tab_id) {
+                    let _ = self.workspace.focus_pane(pane_id);
+                }
+                let content = TabContent::Viewer { path: path.clone() };
+                self.open_tab(content, window, cx);
+            }
         }
     }
 
-    /// Shows `path` in the active tab of the focused pane, or in a new tab if
-    /// the pane has none.
+    fn set_tab_content(&mut self, tab_id: TabId, content: TabContent) -> Result<()> {
+        let pane_id = self
+            .workspace
+            .pane_of_tab(tab_id)
+            .ok_or_else(|| eyre!("tab {tab_id:?} is not open"))?;
+        self.workspace
+            .pane_mut(pane_id)?
+            .set_tab_content(tab_id, content)
+    }
+
+    /// Shows `path` in the active tab of the focused pane if it is a viewer, or
+    /// in a new tab otherwise.
     fn open_in_active_tab(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         match self.active_tab().map(Tab::id) {
-            Some(tab_id) => {
-                if let Err(error) = self.replace_tab_path(tab_id, path, window, cx) {
+            Some(tab_id) if matches!(self.views.get(&tab_id), Some(TabView::Viewer(_))) => {
+                if let Err(error) = self.show_in_viewer(tab_id, path, window, cx) {
                     tracing::error!("{error:#}");
                 }
             }
-            None => self.open_in_new_tab(path, window, cx),
+            _ => self.open_tab(TabContent::Viewer { path }, window, cx),
         }
     }
 
-    /// Shows `path` in a tab of the focused pane.
-    fn replace_tab_path(
+    /// Shows `path` in a viewer tab.
+    fn show_in_viewer(
         &mut self,
         tab_id: TabId,
         path: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
-        let content = TabContent::Viewer { path: path.clone() };
-        self.workspace
-            .pane_mut(self.workspace.focused_pane())?
-            .set_tab_content(tab_id, content)?;
-        if let Some(viewer) = self.viewers.get(&tab_id) {
-            viewer.update(cx, |viewer, cx| viewer.load(path, window, cx));
-        }
+        let Some(TabView::Viewer(viewer)) = self.views.get(&tab_id) else {
+            return Err(eyre!("tab {tab_id:?} is not a viewer"));
+        };
+        let viewer = viewer.clone();
+        self.set_tab_content(tab_id, TabContent::Viewer { path: path.clone() })?;
+        viewer.update(cx, |viewer, cx| viewer.load(path, window, cx));
         cx.notify();
         Ok(())
     }
@@ -101,7 +186,27 @@ impl WorkspaceView {
     }
 
     fn active_viewer(&self) -> Option<&Entity<Viewer>> {
-        self.viewers.get(&self.active_tab()?.id())
+        match self.views.get(&self.active_tab()?.id())? {
+            TabView::Viewer(viewer) => Some(viewer),
+            TabView::Explorer(_) => None,
+        }
+    }
+
+    fn active_explorer(&self) -> Option<&Entity<Explorer>> {
+        match self.views.get(&self.active_tab()?.id())? {
+            TabView::Explorer(explorer) => Some(explorer),
+            TabView::Viewer(_) => None,
+        }
+    }
+
+    /// The folder a new explorer starts in: the one of the active tab, or else
+    /// the working directory.
+    fn current_dir(&self) -> Option<PathBuf> {
+        let from_tab = self.active_tab().and_then(|tab| match tab.content() {
+            TabContent::Explorer { dir } => Some(dir.clone()),
+            TabContent::Viewer { path } => path.parent().map(Path::to_path_buf),
+        });
+        from_tab.or_else(default_dir)
     }
 
     fn reset_view(&mut self, _: &ResetView, _: &mut Window, cx: &mut Context<Self>) {
@@ -129,14 +234,31 @@ impl WorkspaceView {
             return;
         };
         let Some(path) = self
-            .viewers
-            .get(&tab_id)
+            .active_viewer()
             .and_then(|viewer| viewer.read(cx).neighbor(direction))
         else {
             return;
         };
-        if let Err(error) = self.replace_tab_path(tab_id, path, window, cx) {
+        if let Err(error) = self.show_in_viewer(tab_id, path, window, cx) {
             tracing::error!("{error:#}");
+        }
+    }
+
+    fn go_back(&mut self, _: &GoBack, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(explorer) = self.active_explorer() {
+            explorer.update(cx, Explorer::go_back);
+        }
+    }
+
+    fn go_forward(&mut self, _: &GoForward, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(explorer) = self.active_explorer() {
+            explorer.update(cx, Explorer::go_forward);
+        }
+    }
+
+    fn go_up(&mut self, _: &GoUp, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(explorer) = self.active_explorer() {
+            explorer.update(cx, Explorer::go_up);
         }
     }
 
@@ -145,9 +267,13 @@ impl WorkspaceView {
         Self::prompt_for_image(window, cx, Self::open_in_active_tab);
     }
 
-    #[expect(clippy::unused_self, reason = "`cx.listener` takes a method")]
+    /// Opens an explorer of the current folder in a new tab.
     fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
-        Self::prompt_for_image(window, cx, Self::open_in_new_tab);
+        if let Some(dir) = self.current_dir() {
+            self.open_tab(TabContent::Explorer { dir }, window, cx);
+        } else {
+            tracing::error!("no folder to open: the working directory is unknown");
+        }
     }
 
     /// Asks for an image with the file dialog and passes it to `open`, unless
@@ -192,7 +318,7 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// Closes the tab and releases its viewer, with its decoded image.
+    /// Closes the tab and releases its view, with a decoded image if any.
     fn close_tab(&mut self, pane_id: PaneId, tab_id: TabId, cx: &mut Context<Self>) {
         let result = self
             .workspace
@@ -200,7 +326,7 @@ impl WorkspaceView {
             .and_then(|pane| pane.close_tab(tab_id));
         match result {
             Ok(()) => {
-                self.viewers.remove(&tab_id);
+                self.views.remove(&tab_id);
                 cx.notify();
             }
             Err(error) => tracing::error!("{error:#}"),
@@ -267,15 +393,15 @@ impl WorkspaceView {
             return div().into_any_element();
         };
         let active = pane.active_tab().map(Tab::id);
-        let content = match active.and_then(|tab_id| self.viewers.get(&tab_id)) {
-            Some(viewer) => viewer.clone().into_any_element(),
+        let content = match active.and_then(|tab_id| self.views.get(&tab_id)) {
+            Some(view) => view.to_element(),
             None => div()
                 .size_full()
                 .flex()
                 .items_center()
                 .justify_center()
                 .text_color(rgb(0x80_80_80))
-                .child("Ctrl+O: open an image")
+                .child("Ctrl+N: open a folder, Ctrl+O: open an image")
                 .into_any_element(),
         };
         div()
@@ -375,6 +501,14 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::reset_view))
             .on_action(cx.listener(Self::previous_image))
             .on_action(cx.listener(Self::next_image))
+            .on_action(cx.listener(Self::go_back))
+            .on_action(cx.listener(Self::go_forward))
+            .on_action(cx.listener(Self::go_up))
             .child(self.render_layout(self.workspace.layout(), cx))
     }
+}
+
+/// The working directory, or else the home directory.
+pub fn default_dir() -> Option<PathBuf> {
+    std::env::current_dir().ok().or_else(std::env::home_dir)
 }
