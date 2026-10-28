@@ -348,15 +348,16 @@ impl WorkspaceView {
     }
 }
 
-/// The label of a tab: the file name of what it shows.
+/// The label of a tab: the file or folder name of what it shows.
 fn tab_name(tab: &Tab) -> String {
-    match tab.content() {
-        TabContent::Viewer { path } => path
-            .file_name()
-            .unwrap_or(path.as_os_str())
-            .to_string_lossy()
-            .into_owned(),
-    }
+    let path = match tab.content() {
+        TabContent::Viewer { path } => path,
+        TabContent::Explorer { dir } => dir,
+    };
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned()
 }
 
 impl Render for WorkspaceView {

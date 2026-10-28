@@ -64,7 +64,7 @@ pub fn neighbor_image<'a>(
 
 /// Natural, case-insensitive order of file names. Ties are broken so that the
 /// order is total.
-fn compare_names(a: &Path, b: &Path) -> Ordering {
+pub(crate) fn compare_names(a: &Path, b: &Path) -> Ordering {
     let (a, b) = (
         a.file_name().unwrap_or_default(),
         b.file_name().unwrap_or_default(),
@@ -80,38 +80,7 @@ mod tests {
     use std::fs;
 
     use super::*;
-
-    /// A directory under the system temporary directory, removed on drop.
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn with_files(name: &str, files: &[&str]) -> Self {
-            let dir = std::env::temp_dir()
-                .join(format!("deltaflens-folder-{name}-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(&dir).unwrap();
-            for file in files {
-                fs::write(dir.join(file), b"").unwrap();
-            }
-            Self(dir)
-        }
-
-        fn names(&self, paths: &[PathBuf]) -> Vec<String> {
-            paths
-                .iter()
-                .map(|path| {
-                    assert_eq!(path.parent(), Some(self.0.as_path()));
-                    path.file_name().unwrap().to_string_lossy().into_owned()
-                })
-                .collect()
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::test_util::TempDir;
 
     fn paths(names: &[&str]) -> Vec<PathBuf> {
         names
@@ -127,36 +96,36 @@ mod tests {
 
     #[test]
     fn list_images_in_natural_order() {
-        let dir = TempDir::with_files("natural", &["img10.png", "img2.png", "img1.png"]);
-        let images = list_images(&dir.0).unwrap();
+        let dir = TempDir::with_files("folder-natural", &["img10.png", "img2.png", "img1.png"]);
+        let images = list_images(dir.path()).unwrap();
         assert_eq!(dir.names(&images), ["img1.png", "img2.png", "img10.png"]);
     }
 
     #[test]
     fn list_images_ignores_case() {
-        let dir = TempDir::with_files("case", &["b.png", "A.png", "c.JPG"]);
-        let images = list_images(&dir.0).unwrap();
+        let dir = TempDir::with_files("folder-case", &["b.png", "A.png", "c.JPG"]);
+        let images = list_images(dir.path()).unwrap();
         assert_eq!(dir.names(&images), ["A.png", "b.png", "c.JPG"]);
     }
 
     #[test]
     fn list_images_skips_unsupported_files_and_directories() {
-        let dir = TempDir::with_files("unsupported", &["a.png", "notes.txt", "b.avif", "c"]);
-        fs::create_dir(dir.0.join("folder.png")).unwrap();
-        let images = list_images(&dir.0).unwrap();
+        let dir = TempDir::with_files("folder-unsupported", &["a.png", "notes.txt", "b.avif", "c"]);
+        fs::create_dir(dir.path().join("folder.png")).unwrap();
+        let images = list_images(dir.path()).unwrap();
         assert_eq!(dir.names(&images), ["a.png"]);
     }
 
     #[test]
     fn list_images_of_empty_directory() {
-        let dir = TempDir::with_files("empty", &[]);
-        assert_eq!(list_images(&dir.0).unwrap(), Vec::<PathBuf>::new());
+        let dir = TempDir::with_files("folder-empty", &[]);
+        assert_eq!(list_images(dir.path()).unwrap(), Vec::<PathBuf>::new());
     }
 
     #[test]
     fn list_images_of_missing_directory_fails() {
-        let dir = TempDir::with_files("missing", &[]);
-        assert!(list_images(&dir.0.join("missing")).is_err());
+        let dir = TempDir::with_files("folder-missing", &[]);
+        assert!(list_images(&dir.path().join("missing")).is_err());
     }
 
     #[test]

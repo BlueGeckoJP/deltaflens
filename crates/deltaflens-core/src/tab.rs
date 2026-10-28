@@ -4,7 +4,13 @@ use crate::TabId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TabContent {
-    Viewer { path: PathBuf },
+    Viewer {
+        path: PathBuf,
+    },
+    /// Shows the contents of `dir`.
+    Explorer {
+        dir: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
