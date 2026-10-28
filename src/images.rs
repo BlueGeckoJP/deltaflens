@@ -166,6 +166,9 @@ pub struct Images {
     prefetched: HashSet<ImageKey>,
     /// The images the viewers show, whose textures are on the GPU.
     shown: HashSet<ImageKey>,
+    /// The tiles each viewer drew in its last frame, with the key of their
+    /// picture.
+    drawn_tiles: HashMap<EntityId, (ImageKey, Vec<usize>)>,
 }
 
 impl EventEmitter<ImagesEvent> for Images {}
@@ -187,6 +190,7 @@ impl Images {
             failed: HashMap::new(),
             prefetched: HashSet::new(),
             shown: HashSet::new(),
+            drawn_tiles: HashMap::new(),
         }
     }
 
@@ -216,7 +220,45 @@ impl Images {
     /// Forgets what `viewer` asks for, as it is gone.
     pub fn forget(&mut self, viewer: EntityId, cx: &mut Context<Self>) {
         self.requests.remove(&viewer);
+        if let Some((key, tiles)) = self.drawn_tiles.remove(&viewer) {
+            self.release_tiles(&key, &tiles, cx);
+        }
         self.schedule(cx);
+    }
+
+    /// Notes the tiles of the picture of `key` that `viewer` drew, and frees
+    /// the textures of the tiles that no viewer draws any longer. The viewers
+    /// share the textures, so one must not free a tile another still draws.
+    pub fn set_drawn_tiles(
+        &mut self,
+        viewer: EntityId,
+        key: ImageKey,
+        tiles: Vec<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some((old_key, old_tiles)) = self.drawn_tiles.insert(viewer, (key, tiles)) {
+            self.release_tiles(&old_key, &old_tiles, cx);
+        }
+    }
+
+    /// Frees the textures of the `tiles` of the picture of `key` that no
+    /// viewer draws.
+    fn release_tiles(&self, key: &ImageKey, tiles: &[usize], cx: &mut Context<Self>) {
+        let Some(picture) = self.cache.peek(key) else {
+            return;
+        };
+        let drawn = |index: &usize| {
+            self.drawn_tiles
+                .values()
+                .any(|(drawn_key, tiles)| drawn_key == key && tiles.contains(index))
+        };
+        let unused = tiles
+            .iter()
+            .filter(|index| !drawn(index))
+            .filter_map(|&index| picture.tiles.get(index))
+            .map(|(_, tile)| tile.clone())
+            .collect();
+        Self::release_textures(unused, cx);
     }
 
     /// Pins the images shown or to be shown, cancels the decoding of images
@@ -243,6 +285,23 @@ impl Images {
             .flat_map(|request| request.current.iter().cloned())
             .chain(shown.iter().cloned())
             .collect();
+        // Forget the tiles of viewers that no longer show their picture.
+        let stale: Vec<EntityId> = self
+            .drawn_tiles
+            .iter()
+            .filter(|(viewer, (key, _))| {
+                !self
+                    .requests
+                    .get(viewer)
+                    .is_some_and(|request| request.shown.contains(key))
+            })
+            .map(|(viewer, _)| *viewer)
+            .collect();
+        for viewer in stale {
+            if let Some((key, tiles)) = self.drawn_tiles.remove(&viewer) {
+                self.release_tiles(&key, &tiles, cx);
+            }
+        }
         self.shown = shown;
         let evicted = self.cache.set_pinned(pinned);
         Self::release(
@@ -350,15 +409,23 @@ impl Images {
 
     /// Frees the textures of `pictures`, if they have any.
     fn release(pictures: Vec<Arc<Picture>>, cx: &mut Context<Self>) {
-        if pictures.is_empty() {
+        let mut images = Vec::new();
+        for picture in pictures {
+            images.extend(picture.textures().cloned());
+        }
+        Self::release_textures(images, cx);
+    }
+
+    /// Frees the textures of `images`, if they have any.
+    fn release_textures(images: Vec<Arc<RenderImage>>, cx: &mut Context<Self>) {
+        if images.is_empty() {
             return;
         }
-        // Wait until no window is being updated, as `drop_image` would miss it.
+        // Wait until no window is being updated or drawn, as `drop_image`
+        // would miss it.
         cx.defer(move |cx| {
-            for picture in pictures {
-                for image in picture.textures() {
-                    cx.drop_image(image.clone(), None);
-                }
+            for image in images {
+                cx.drop_image(image, None);
             }
         });
     }

@@ -42,9 +42,10 @@ pub struct Viewer {
     /// A smaller version of `image`, drawn instead of it while it is shown at
     /// most that large.
     downscaled: Option<(ImageKey, Arc<Picture>)>,
-    /// The tiles of the image of the key drawn in the last frame, whose
-    /// textures are freed once they are no longer drawn.
-    drawn_tiles: (Option<ImageKey>, Vec<usize>),
+    /// The tiles of the image of the key drawn in the last frame, told to
+    /// [`Images`] when they change, which frees the textures of tiles no viewer
+    /// draws.
+    drawn_tiles: Option<(ImageKey, Vec<usize>)>,
     /// The smaller version asked for, for the current scale.
     wanted_downscaled: Option<ImageKey>,
     /// Asks for the smaller version for a new scale once it stays the same.
@@ -91,7 +92,7 @@ impl Viewer {
             images,
             image: None,
             downscaled: None,
-            drawn_tiles: (None, Vec::new()),
+            drawn_tiles: None,
             wanted_downscaled: None,
             downscale_task: None,
             error: None,
@@ -410,7 +411,7 @@ impl Viewer {
     /// pixels as the screen shows, so that it is not enlarged: the downscaled
     /// one, the image itself, or the tiles of a large image that are on
     /// screen.
-    fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window) {
+    fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let Some((key, picture)) = &self.image else {
             return;
         };
@@ -438,18 +439,16 @@ impl Viewer {
             }
             None => paint_tiles(window, bounds, rect, picture, &self.key),
         };
-        // The textures of another image are freed by `Images` once it is no
-        // longer shown.
-        if self.drawn_tiles.0.as_ref() == Some(key) {
-            for index in &self.drawn_tiles.1 {
-                if !tiles.contains(index)
-                    && let Some((_, tile)) = picture.tiles.get(*index)
-                {
-                    let _ = window.drop_image(tile.clone());
-                }
+        let drawn = Some((key.clone(), tiles));
+        if self.drawn_tiles != drawn {
+            self.drawn_tiles.clone_from(&drawn);
+            if let Some((key, tiles)) = drawn {
+                let id = cx.entity_id();
+                self.images.update(cx, |images, cx| {
+                    images.set_drawn_tiles(id, key, tiles, cx);
+                });
             }
         }
-        self.drawn_tiles = (Some(key.clone()), tiles);
     }
 }
 
@@ -475,7 +474,7 @@ impl Render for Viewer {
                         }
                     },
                     move |bounds, (), window, cx| {
-                        view.update(cx, |this, _| this.paint(bounds, window));
+                        view.update(cx, |this, cx| this.paint(bounds, window, cx));
                         if dragging {
                             listen_to_drag(&view, window);
                         }
