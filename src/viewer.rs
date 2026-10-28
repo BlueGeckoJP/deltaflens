@@ -5,7 +5,8 @@ use std::{
 };
 
 use deltaflens_core::{
-    Direction, ViewTransform, downscaled_size, list_images, neighbor_image, prefetch_images,
+    Direction, Rect, ViewTransform, downscaled_size, list_images, neighbor_image, prefetch_images,
+    visible_tiles,
 };
 use gpui::{
     Bounds, Context, CursorStyle, DispatchPhase, Entity, MouseButton, MouseDownEvent,
@@ -13,7 +14,7 @@ use gpui::{
     Task, Window, canvas, div, point, prelude::*, px, rgb, size,
 };
 
-use crate::images::{ImageKey, Images, ImagesEvent, Request};
+use crate::images::{ImageKey, Images, ImagesEvent, Picture, Request};
 
 /// How much one wheel notch zooms.
 const ZOOM_STEP: f32 = 1.2;
@@ -37,10 +38,13 @@ pub struct Viewer {
     images: Entity<Images>,
     /// The image of `key`, or of the previous key while `key` is loading.
     /// `None` while the tab is hidden, so that only [`Images`] holds it.
-    image: Option<(ImageKey, Arc<RenderImage>)>,
+    image: Option<(ImageKey, Arc<Picture>)>,
     /// A smaller version of `image`, drawn instead of it while it is shown at
     /// most that large.
-    downscaled: Option<(ImageKey, Arc<RenderImage>)>,
+    downscaled: Option<(ImageKey, Arc<Picture>)>,
+    /// The tiles of the image of the key drawn in the last frame, whose
+    /// textures are freed once they are no longer drawn.
+    drawn_tiles: (Option<ImageKey>, Vec<usize>),
     /// The smaller version asked for, for the current scale.
     wanted_downscaled: Option<ImageKey>,
     /// Asks for the smaller version for a new scale once it stays the same.
@@ -87,6 +91,7 @@ impl Viewer {
             images,
             image: None,
             downscaled: None,
+            drawn_tiles: (None, Vec::new()),
             wanted_downscaled: None,
             downscale_task: None,
             error: None,
@@ -254,17 +259,18 @@ impl Viewer {
     /// The key of the smaller version of the current image for the scale it is
     /// shown at, or `None` if the image itself is to be drawn.
     fn downscaled_key(&self) -> Option<ImageKey> {
-        let (key, image) = self.image.as_ref().filter(|(key, _)| *key == self.key)?;
+        let (key, picture) = self.image.as_ref().filter(|(key, _)| *key == self.key)?;
         let (image_size, viewport) = self.sizes()?;
         // The scale of logical sizes is also that of device pixels shown to
         // image pixels.
         let scale = self.transform.scale(image_size, viewport);
-        let size = image.size(0);
-        let (width, height) = (
-            u32::try_from(size.width.0).ok()?,
-            u32::try_from(size.height.0).ok()?,
-        );
-        downscaled_size(width, height, scale).map(|size| key.downscaled(size))
+        let (width, height) = picture.size;
+        let size = downscaled_size(width, height, scale)?;
+        // A tiled image is downscaled from its overview, which is no use when
+        // shown at least as large.
+        let overview = picture.image.size(0);
+        let smaller = i64::from(size.0) < i64::from(overview.width.0);
+        smaller.then(|| key.downscaled(size))
     }
 
     /// Lists the folder of the current image in the background, unless it is
@@ -320,7 +326,7 @@ impl Viewer {
             .map(|folder| folder.images.as_slice())
     }
 
-    fn show(&mut self, image: Arc<RenderImage>, cx: &mut Context<Self>) {
+    fn show(&mut self, image: Arc<Picture>, cx: &mut Context<Self>) {
         if self
             .downscaled
             .as_ref()
@@ -353,9 +359,12 @@ impl Viewer {
 
     /// The image and viewport sizes in logical pixels, if both are known.
     fn sizes(&self) -> Option<(deltaflens_core::Size, deltaflens_core::Size)> {
-        let (_, image) = self.image.as_ref()?;
+        let (_, picture) = self.image.as_ref()?;
         let (bounds, scale_factor) = self.viewport?;
-        Some((image_size(image, scale_factor), to_core_size(bounds.size)))
+        Some((
+            image_size(picture.size, scale_factor),
+            to_core_size(bounds.size),
+        ))
     }
 
     fn on_scroll(&mut self, event: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -397,39 +406,50 @@ impl Viewer {
         cx.notify();
     }
 
-    fn paint(&self, bounds: Bounds<Pixels>, window: &mut Window) {
-        let Some((key, image)) = &self.image else {
+    /// Draws the smallest version of the image that has at least as many
+    /// pixels as the screen shows, so that it is not enlarged: the downscaled
+    /// one, the image itself, or the tiles of a large image that are on
+    /// screen.
+    fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window) {
+        let Some((key, picture)) = &self.image else {
             return;
         };
+        let scale_factor = window.scale_factor();
         let rect = self.transform.image_rect(
-            image_size(image, window.scale_factor()),
+            image_size(picture.size, scale_factor),
             to_core_size(bounds.size),
         );
-        // The smaller version is drawn while it has at least as many pixels as
-        // the screen shows, so that it is not enlarged.
+        let large_enough =
+            |image: &RenderImage| covers(render_size(image, scale_factor), rect.size);
         let image = match &self.downscaled {
             Some((downscaled_key, downscaled))
-                if downscaled_key.original() == *key
-                    && covers(image_size(downscaled, window.scale_factor()), rect.size) =>
+                if downscaled_key.original() == *key && large_enough(&downscaled.image) =>
             {
-                downscaled
+                Some(&downscaled.image)
             }
-            _ => image,
+            _ => {
+                (picture.tiles.is_empty() || large_enough(&picture.image)).then_some(&picture.image)
+            }
         };
-        let image_bounds = Bounds::new(
-            bounds.origin + point(px(rect.origin.x), px(rect.origin.y)),
-            size(px(rect.size.width), px(rect.size.height)),
-        );
-        if let Err(error) = window.paint_image(
-            bounds,
-            image_bounds,
-            gpui::Corners::default(),
-            image.clone(),
-            0,
-            false,
-        ) {
-            tracing::error!("failed to paint {}: {error:#}", self.key.path.display());
+        let tiles = match image {
+            Some(image) => {
+                paint_image(window, bounds, rect, image, &self.key);
+                Vec::new()
+            }
+            None => paint_tiles(window, bounds, rect, picture, &self.key),
+        };
+        // The textures of another image are freed by `Images` once it is no
+        // longer shown.
+        if self.drawn_tiles.0.as_ref() == Some(key) {
+            for index in &self.drawn_tiles.1 {
+                if !tiles.contains(index)
+                    && let Some((_, tile)) = picture.tiles.get(*index)
+                {
+                    let _ = window.drop_image(tile.clone());
+                }
+            }
         }
+        self.drawn_tiles = (Some(key.clone()), tiles);
     }
 }
 
@@ -455,7 +475,7 @@ impl Render for Viewer {
                         }
                     },
                     move |bounds, (), window, cx| {
-                        view.read(cx).paint(bounds, window);
+                        view.update(cx, |this, _| this.paint(bounds, window));
                         if dragging {
                             listen_to_drag(&view, window);
                         }
@@ -500,10 +520,85 @@ fn listen_to_drag(view: &gpui::Entity<Viewer>, window: &mut Window) {
     });
 }
 
-/// The size of the image in logical pixels, so that scale 1.0 shows one image
-/// pixel per device pixel.
+/// Draws `image` over `rect`, relative to the viewer `bounds`.
+fn paint_image(
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    rect: Rect,
+    image: &Arc<RenderImage>,
+    key: &ImageKey,
+) {
+    let image_bounds = Bounds::new(
+        bounds.origin + point(px(rect.origin.x), px(rect.origin.y)),
+        size(px(rect.size.width), px(rect.size.height)),
+    );
+    if let Err(error) = window.paint_image(
+        bounds,
+        image_bounds,
+        gpui::Corners::default(),
+        image.clone(),
+        0,
+        false,
+    ) {
+        tracing::error!("failed to paint {}: {error:#}", key.path.display());
+    }
+}
+
+/// Draws the tiles of `picture` on screen, the image being over `rect`, and
+/// returns their indices.
 #[allow(clippy::cast_precision_loss)]
-fn image_size(image: &RenderImage, scale_factor: f32) -> deltaflens_core::Size {
+fn paint_tiles(
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    rect: Rect,
+    picture: &Picture,
+    key: &ImageKey,
+) -> Vec<usize> {
+    // Logical pixels per image pixel.
+    let scale = rect.size.width / picture.size.0 as f32;
+    let viewport = to_core_size(bounds.size);
+    let view = Rect {
+        origin: deltaflens_core::Point {
+            x: -rect.origin.x / scale,
+            y: -rect.origin.y / scale,
+        },
+        size: deltaflens_core::Size {
+            width: viewport.width / scale,
+            height: viewport.height / scale,
+        },
+    };
+    let rects: Vec<_> = picture.tiles.iter().map(|(rect, _)| *rect).collect();
+    let visible = visible_tiles(&rects, view);
+    for &index in &visible {
+        let (tile, image) = &picture.tiles[index];
+        let tile_rect = Rect {
+            origin: deltaflens_core::Point {
+                x: rect.origin.x + tile.x as f32 * scale,
+                y: rect.origin.y + tile.y as f32 * scale,
+            },
+            size: deltaflens_core::Size {
+                width: tile.width as f32 * scale,
+                height: tile.height as f32 * scale,
+            },
+        };
+        paint_image(window, bounds, tile_rect, image, key);
+    }
+    visible
+}
+
+/// The size of an image of `size` pixels in logical pixels, so that scale 1.0
+/// shows one image pixel per device pixel.
+#[allow(clippy::cast_precision_loss)]
+fn image_size(size: (u32, u32), scale_factor: f32) -> deltaflens_core::Size {
+    deltaflens_core::Size {
+        width: size.0 as f32 / scale_factor,
+        height: size.1 as f32 / scale_factor,
+    }
+}
+
+/// The size of `image` in logical pixels, as [`image_size`].
+#[allow(clippy::cast_precision_loss)]
+fn render_size(image: &RenderImage, scale_factor: f32) -> deltaflens_core::Size {
     let size = image.size(0);
     deltaflens_core::Size {
         width: size.width.0 as f32 / scale_factor,

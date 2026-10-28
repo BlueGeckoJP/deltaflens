@@ -32,7 +32,7 @@ pub fn thumbnail(path: &Path, max_size: u32) -> Result<DecodedImage> {
 
 /// The size of a `width` x `height` image shrunk to fit in a `max_size`
 /// square, at least 1 x 1.
-fn fit_within(width: u32, height: u32, max_size: u32) -> (u32, u32) {
+pub(crate) fn fit_within(width: u32, height: u32, max_size: u32) -> (u32, u32) {
     let longest = width.max(height);
     if longest <= max_size {
         return (width, height);

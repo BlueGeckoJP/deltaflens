@@ -3,12 +3,11 @@
 use std::{fs::File, io::Read, path::Path};
 
 use eyre::{Result, bail, eyre};
-use image::Limits;
 use jxl_oxide::{
     EnumColourEncoding, JxlImage, PixelFormat, RenderingIntent, color::ColourEncoding,
 };
 
-use super::DecodedImage;
+use super::{DecodedImage, limits};
 
 /// A bare JPEG XL codestream.
 const CODESTREAM_SIGNATURE: [u8; 2] = [0xff, 0x0a];
@@ -60,7 +59,7 @@ pub(super) fn decode(path: &Path) -> Result<DecodedImage> {
         bail!("CMYK images are not supported");
     }
     let (width, height) = (image.width(), image.height());
-    Limits::default().reserve(u64::from(width) * u64::from(height) * 4)?;
+    limits().reserve(u64::from(width) * u64::from(height) * 4)?;
 
     let render = image.render_frame(0).map_err(|error| eyre!(error))?;
     let mut stream = render.stream();

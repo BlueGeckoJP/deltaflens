@@ -17,6 +17,7 @@ mod preset;
 mod tab;
 #[cfg(test)]
 mod test_util;
+mod tiles;
 mod view;
 mod workspace;
 
@@ -33,5 +34,6 @@ pub use lru::LruCache;
 pub use pane::Pane;
 pub use preset::Preset;
 pub use tab::{Tab, TabContent};
+pub use tiles::{TileRect, cut_tiles, overview_size, tile_rects, visible_tiles};
 pub use view::{Point, Rect, Size, ViewTransform};
 pub use workspace::Workspace;

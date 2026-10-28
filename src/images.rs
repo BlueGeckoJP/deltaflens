@@ -5,7 +5,9 @@ use std::{
     time::SystemTime,
 };
 
-use deltaflens_core::{DecodedImage, LruCache, decode, downscale};
+use deltaflens_core::{
+    DecodedImage, LruCache, TileRect, cut_tiles, decode, downscale, overview_size, tile_rects,
+};
 use eyre::{Result, eyre};
 use gpui::{AppContext as _, Context, EntityId, EventEmitter, RenderImage, SharedString, Task};
 
@@ -14,6 +16,11 @@ use crate::render_image::to_render_image;
 /// How many bytes of decoded images to keep in memory. A 4K image takes about
 /// 33 MB.
 const CACHE_BYTES: usize = 1024 * 1024 * 1024;
+/// The largest texture assumed to be possible, in pixels on each side. gpui
+/// does not tell the limit of the GPU; desktop GPUs have at least 8192.
+const MAX_TEXTURE_SIZE: u32 = 8192;
+/// The largest tile of an image that does not fit in a texture.
+const MAX_TILE_SIZE: u32 = 2048;
 /// At most this many images are decoded ahead of time at once, so that the
 /// images asked for to be shown now are not kept waiting.
 const MAX_PARALLEL_PREFETCH: usize = 2;
@@ -62,6 +69,62 @@ impl ImageKey {
     }
 }
 
+/// An image ready to draw.
+pub struct Picture {
+    /// The whole image, downscaled to fit in a texture if it is larger.
+    pub image: Arc<RenderImage>,
+    /// The size of the image in pixels, which `image` has unless the image is
+    /// tiled.
+    pub size: (u32, u32),
+    /// The image cut into tiles that each fit in a texture, if it does not fit
+    /// in one.
+    pub tiles: Vec<(TileRect, Arc<RenderImage>)>,
+}
+
+impl Picture {
+    /// Makes the textures of `image`, which is tiled if it does not fit in a
+    /// texture.
+    fn new(image: DecodedImage) -> Result<Self> {
+        let size = (image.width(), image.height());
+        if size.0 <= MAX_TEXTURE_SIZE && size.1 <= MAX_TEXTURE_SIZE {
+            return Ok(Self {
+                image: to_render_image(image)?,
+                size,
+                tiles: Vec::new(),
+            });
+        }
+        let overview = downscale(
+            image.pixels(),
+            size,
+            overview_size(size.0, size.1, MAX_TEXTURE_SIZE),
+        )?;
+        let rects = tile_rects(size.0, size.1, MAX_TILE_SIZE);
+        let tiles = cut_tiles(&image, &rects);
+        drop(image);
+        Ok(Self {
+            image: to_render_image(overview)?,
+            size,
+            tiles: rects
+                .into_iter()
+                .zip(tiles)
+                .map(|(rect, tile)| Ok((rect, to_render_image(tile)?)))
+                .collect::<Result<_>>()?,
+        })
+    }
+
+    /// The memory the pixels take.
+    fn bytes(&self) -> usize {
+        self.textures()
+            .map(|image| image.as_bytes(0).map_or(0, <[u8]>::len))
+            .sum()
+    }
+
+    /// The images that become textures when drawn.
+    fn textures(&self) -> impl Iterator<Item = &Arc<RenderImage>> {
+        std::iter::once(&self.image).chain(self.tiles.iter().map(|(_, tile)| tile))
+    }
+}
+
 /// What a viewer asks for.
 #[derive(Debug, Default)]
 pub struct Request {
@@ -90,7 +153,7 @@ pub enum ImagesEvent {
 /// The viewers do not keep images of their own: the images on screen are
 /// pinned in the cache, and a viewer whose tab is hidden asks for nothing.
 pub struct Images {
-    cache: LruCache<ImageKey, Arc<RenderImage>>,
+    cache: LruCache<ImageKey, Arc<Picture>>,
     /// By the viewer that asks.
     requests: HashMap<EntityId, Request>,
     /// Dropping a task cancels the decoding, unless it has started.
@@ -110,8 +173,10 @@ impl EventEmitter<ImagesEvent> for Images {}
 impl Images {
     pub fn new(cx: &mut Context<Self>) -> Self {
         cx.on_release(|this, cx| {
-            for (_, image) in this.cache.drain() {
-                cx.drop_image(image, None);
+            for (_, picture) in this.cache.drain() {
+                for image in picture.textures() {
+                    cx.drop_image(image.clone(), None);
+                }
             }
         })
         .detach();
@@ -126,7 +191,7 @@ impl Images {
     }
 
     /// Returns the image if it is decoded, and marks it as recently used.
-    pub fn get(&mut self, key: &ImageKey) -> Option<Arc<RenderImage>> {
+    pub fn get(&mut self, key: &ImageKey) -> Option<Arc<Picture>> {
         self.cache.get(key).cloned()
     }
 
@@ -166,7 +231,7 @@ impl Images {
         // The images no longer shown stay in memory, but their textures are
         // freed, as they would double the memory used for them. Showing them
         // again uploads them again.
-        let hidden: Vec<Arc<RenderImage>> = self
+        let hidden: Vec<Arc<Picture>> = self
             .shown
             .difference(&shown)
             .filter_map(|key| self.cache.peek(key).cloned())
@@ -180,7 +245,10 @@ impl Images {
             .collect();
         self.shown = shown;
         let evicted = self.cache.set_pinned(pinned);
-        Self::release(evicted.into_iter().map(|(_, image)| image).collect(), cx);
+        Self::release(
+            evicted.into_iter().map(|(_, picture)| picture).collect(),
+            cx,
+        );
 
         let current: Vec<ImageKey> = self
             .requests
@@ -242,10 +310,11 @@ impl Images {
                         let key = key.clone();
                         async move {
                             match (source, key.downscaled) {
-                                (Some(source), Some(size)) => downscale_image(&source, size),
+                                (Some(source), Some(size)) => downscale_image(&source.image, size),
                                 _ => decode(&key.path),
                             }
-                            .and_then(to_render_image)
+                            .and_then(Picture::new)
+                            .map(Arc::new)
                         }
                     })
                     .await;
@@ -256,15 +325,18 @@ impl Images {
         self.in_progress.insert(key.clone(), task);
     }
 
-    fn finish(&mut self, key: ImageKey, result: Result<Arc<RenderImage>>, cx: &mut Context<Self>) {
+    fn finish(&mut self, key: ImageKey, result: Result<Arc<Picture>>, cx: &mut Context<Self>) {
         self.in_progress.remove(&key);
         match result {
-            Ok(image) => {
+            Ok(picture) => {
                 // Forgotten by `schedule` unless it is asked for ahead of time.
                 self.prefetched.insert(key.clone());
-                let bytes = image.as_bytes(0).map_or(0, <[u8]>::len);
-                let evicted = self.cache.insert(key.clone(), image, bytes);
-                Self::release(evicted.into_iter().map(|(_, image)| image).collect(), cx);
+                let bytes = picture.bytes();
+                let evicted = self.cache.insert(key.clone(), picture, bytes);
+                Self::release(
+                    evicted.into_iter().map(|(_, picture)| picture).collect(),
+                    cx,
+                );
                 cx.emit(ImagesEvent::Loaded(key));
             }
             Err(error) => {
@@ -276,15 +348,17 @@ impl Images {
         self.schedule(cx);
     }
 
-    /// Frees the textures of `images`, if they have any.
-    fn release(images: Vec<Arc<RenderImage>>, cx: &mut Context<Self>) {
-        if images.is_empty() {
+    /// Frees the textures of `pictures`, if they have any.
+    fn release(pictures: Vec<Arc<Picture>>, cx: &mut Context<Self>) {
+        if pictures.is_empty() {
             return;
         }
         // Wait until no window is being updated, as `drop_image` would miss it.
         cx.defer(move |cx| {
-            for image in images {
-                cx.drop_image(image, None);
+            for picture in pictures {
+                for image in picture.textures() {
+                    cx.drop_image(image.clone(), None);
+                }
             }
         });
     }

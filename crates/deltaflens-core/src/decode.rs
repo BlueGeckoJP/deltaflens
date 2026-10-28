@@ -8,8 +8,20 @@ use std::path::Path;
 use eyre::{Result, WrapErr};
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
 
-pub(crate) use self::encode::encode_png;
+pub(crate) use self::{encode::encode_png, thumbnail::fit_within};
 pub use self::{thumbnail::thumbnail, thumbnail_cache::ThumbnailCache};
+
+/// The most memory the pixels of a decoded image may take: 4 GiB, a
+/// 32768 x 32768 image in BGRA. The default of `image`, 512 MiB, stops at about
+/// 11500 x 11500.
+const MAX_DECODED_BYTES: u64 = 4 << 30;
+
+/// The limits for decoding an image.
+pub(crate) fn limits() -> Limits {
+    let mut limits = Limits::default();
+    limits.max_alloc = Some(MAX_DECODED_BYTES);
+    limits
+}
 
 /// A decoded image with 8-bit BGRA pixels, the layout gpui's `RenderImage`
 /// expects.
@@ -73,11 +85,11 @@ fn decode_inner(path: &Path) -> Result<DecodedImage> {
     if jxl::is_jxl(path)? {
         return jxl::decode(path);
     }
-    let mut decoder = ImageReader::open(path)?
-        .with_guessed_format()?
-        .into_decoder()?;
+    let mut reader = ImageReader::open(path)?.with_guessed_format()?;
+    reader.limits(limits());
+    let mut decoder = reader.into_decoder()?;
     // `ImageReader::decode` checks this, but `into_decoder` does not.
-    Limits::default().reserve(decoder.total_bytes())?;
+    limits().reserve(decoder.total_bytes())?;
     let orientation = decoder.orientation()?;
     let mut image = DynamicImage::from_decoder(decoder)?;
     image.apply_orientation(orientation);
