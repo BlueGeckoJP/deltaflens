@@ -3,7 +3,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use deltaflens_core::{Entry, EntryKind, History, Sort, list_entries, sort_entries};
+use deltaflens_core::{
+    Entry, EntryKind, History, Sort, SortKey, SortOrder, list_entries, sort_entries,
+};
 use gpui::{
     AnyElement, ClickEvent, Context, Entity, EventEmitter, MouseButton, MouseDownEvent,
     NavigationDirection, ObjectFit, Pixels, ScrollStrategy, SharedString, Task,
@@ -116,13 +118,27 @@ impl Explorer {
             let _ = this.update(cx, |this, cx| {
                 this.load_task = None;
                 match result {
-                    Ok(entries) => this.entries = entries,
+                    Ok(mut entries) => {
+                        // The sort may have changed while loading.
+                        if this.sort != sort {
+                            sort_entries(&mut entries, this.sort);
+                        }
+                        this.entries = entries;
+                    }
                     Err(error) => this.error = Some(format!("{error:#}").into()),
                 }
                 cx.notify();
             });
         }));
         cx.notify();
+    }
+
+    fn set_sort(&mut self, sort: Sort, cx: &mut Context<Self>) {
+        if sort != self.sort {
+            self.sort = sort;
+            sort_entries(&mut self.entries, sort);
+            cx.notify();
+        }
     }
 
     fn open_entry(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -165,6 +181,7 @@ impl Explorer {
                 cx.listener(|this, _: &ClickEvent, _, cx| this.go_up(cx)),
             ))
             .child(self.render_path_bar(cx))
+            .child(self.render_sort_buttons(cx))
     }
 
     /// Each folder from the root to the current one, as a button that moves
@@ -213,6 +230,44 @@ impl Explorer {
                             })),
                     )
             }))
+    }
+
+    /// Chooses the sort key, and toggles the order.
+    fn render_sort_buttons(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let sort = self.sort;
+        let key_button = |key: SortKey, label: &'static str, cx: &mut Context<Self>| {
+            toolbar_button(label, sort.key == key)
+                .id(label)
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.set_sort(Sort { key, ..sort }, cx);
+                }))
+        };
+        let (order_label, reversed) = match sort.order {
+            SortOrder::Ascending => ("↑ Ascending", SortOrder::Descending),
+            SortOrder::Descending => ("↓ Descending", SortOrder::Ascending),
+        };
+        div()
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .gap_1()
+            .ml_2()
+            .text_sm()
+            .child(key_button(SortKey::Name, "Name", cx))
+            .child(key_button(SortKey::Modified, "Modified", cx))
+            .child(
+                toolbar_button(order_label, false)
+                    .id("order")
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.set_sort(
+                            Sort {
+                                order: reversed,
+                                ..sort
+                            },
+                            cx,
+                        );
+                    })),
+            )
     }
 
     fn render_grid(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -380,6 +435,18 @@ fn column_count(width: Pixels) -> usize {
     #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let columns = (available / CELL_WIDTH).floor().max(1.) as usize;
     columns
+}
+
+/// A text button in the toolbar, highlighted when `selected`.
+fn toolbar_button(label: &'static str, selected: bool) -> gpui::Div {
+    div()
+        .px_2()
+        .py_0p5()
+        .rounded_sm()
+        .bg(rgb(if selected { 0x33_33_33 } else { 0x18_18_18 }))
+        .text_color(rgb(if selected { 0xe0_e0_e0 } else { 0xa0_a0_a0 }))
+        .hover(|style| style.bg(rgb(0x2a_2a_2a)))
+        .child(label)
 }
 
 fn nav_button(
