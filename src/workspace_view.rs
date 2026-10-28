@@ -486,6 +486,8 @@ impl WorkspaceView {
             .text_sm()
             .text_color(rgb(0xd0_d0_d0))
             .shadow_md()
+            // Keep clicks on the menu from reaching the tabs under it.
+            .occlude()
             .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
                 this.tab_menu = None;
                 cx.notify();
