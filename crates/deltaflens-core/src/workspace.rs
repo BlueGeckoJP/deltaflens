@@ -86,6 +86,15 @@ impl Workspace {
         Ok(tab_id)
     }
 
+    /// The pane that has the tab, if any.
+    #[must_use]
+    pub fn pane_of_tab(&self, tab_id: TabId) -> Option<PaneId> {
+        self.panes
+            .iter()
+            .find(|(_, pane)| pane.tabs().iter().any(|tab| tab.id() == tab_id))
+            .map(|(&pane_id, _)| pane_id)
+    }
+
     fn allocate_id(&mut self) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
@@ -202,5 +211,17 @@ mod tests {
         let mut workspace = Workspace::new();
         assert!(workspace.pane(PaneId(99)).is_err());
         assert!(workspace.pane_mut(PaneId(99)).is_err());
+    }
+
+    #[test]
+    fn pane_of_tab_finds_the_pane() {
+        let mut workspace = Workspace::new();
+        let first = workspace.focused_pane();
+        let a = workspace.open_tab(first, viewer("a.jxl")).unwrap();
+        let second = workspace.split_pane(first, Axis::Horizontal).unwrap();
+        let b = workspace.open_tab(second, viewer("b.jxl")).unwrap();
+        assert_eq!(workspace.pane_of_tab(a), Some(first));
+        assert_eq!(workspace.pane_of_tab(b), Some(second));
+        assert_eq!(workspace.pane_of_tab(TabId(99)), None);
     }
 }

@@ -25,3 +25,31 @@ open('orientation-6.jpg', 'wb').write(data[:2] + app1 + data[2:])
 EOF
 rm plain.jpg
 ```
+
+The JPEG XL fixtures are lossless, made with the pure-Rust encoder
+`zune-jpegxl` 0.4 (no JPEG XL encoder is packaged for the development
+machine):
+
+```rust
+use zune_core::{bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions};
+use zune_jpegxl::JxlSimpleEncoder;
+
+fn write(name: &str, pixels: &[u8], width: usize, height: usize, colorspace: ColorSpace) {
+    let options = EncoderOptions::new(width, height, colorspace, BitDepth::Eight);
+    let encoded = JxlSimpleEncoder::new(pixels, options).encode().unwrap();
+    std::fs::write(name, encoded).unwrap();
+}
+
+// The encoder needs a height of at least 2.
+write("red-3x2.jxl", &[255, 0, 0].repeat(6), 3, 2, ColorSpace::RGB);
+// Each row: opaque red, half-transparent blue.
+write("rgba-2x2.jxl", &[255, 0, 0, 255, 0, 0, 255, 128].repeat(2), 2, 2, ColorSpace::RGBA);
+// Each row: black, white.
+write("gray-2x2.jxl", &[0, 255].repeat(2), 2, 2, ColorSpace::Luma);
+```
+
+```sh
+# A JPEG XL file with a misleading extension.
+cp red-3x2.jxl jxl-named.png
+head -c 20 red-3x2.jxl > truncated.jxl
+```

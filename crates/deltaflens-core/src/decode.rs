@@ -1,7 +1,15 @@
+mod encode;
+mod jxl;
+mod thumbnail;
+mod thumbnail_cache;
+
 use std::path::Path;
 
 use eyre::{Result, WrapErr};
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
+
+pub(crate) use self::encode::encode_png;
+pub use self::{thumbnail::thumbnail, thumbnail_cache::ThumbnailCache};
 
 /// A decoded image with 8-bit BGRA pixels, the layout gpui's `RenderImage`
 /// expects.
@@ -38,9 +46,10 @@ impl DecodedImage {
 /// Decodes the image at `path`, detecting the format from the file contents
 /// rather than the extension.
 ///
-/// The EXIF orientation is applied, images with more than 8 bits per channel
-/// are converted to 8 bits, and only the first frame of an animation is
-/// decoded.
+/// The orientation is applied, images with more than 8 bits per channel are
+/// converted to 8 bits, and only the first frame of an animation is decoded.
+/// JPEG XL images are converted to sRGB, unless their color space is given by
+/// an ICC profile.
 ///
 /// # Errors
 ///
@@ -51,6 +60,9 @@ pub fn decode(path: &Path) -> Result<DecodedImage> {
 }
 
 fn decode_inner(path: &Path) -> Result<DecodedImage> {
+    if jxl::is_jxl(path)? {
+        return jxl::decode(path);
+    }
     let mut decoder = ImageReader::open(path)?
         .with_guessed_format()?
         .into_decoder()?;
@@ -75,9 +87,10 @@ fn decode_inner(path: &Path) -> Result<DecodedImage> {
 /// format that [`decode`] can read.
 #[must_use]
 pub fn is_supported_image(path: &Path) -> bool {
-    path.extension()
-        .and_then(ImageFormat::from_extension)
-        .is_some_and(|format| format.reading_enabled())
+    path.extension().is_some_and(|extension| {
+        extension.eq_ignore_ascii_case("jxl")
+            || ImageFormat::from_extension(extension).is_some_and(|format| format.reading_enabled())
+    })
 }
 
 #[cfg(test)]
@@ -148,6 +161,39 @@ mod tests {
     }
 
     #[test]
+    fn decode_jxl_as_bgra() {
+        let image = decode(&fixture("red-3x2.jxl")).unwrap();
+        assert_eq!((image.width(), image.height()), (3, 2));
+        assert_eq!(image.into_pixels(), RED.repeat(6));
+    }
+
+    #[test]
+    fn decode_jxl_with_alpha() {
+        let image = decode(&fixture("rgba-2x2.jxl")).unwrap();
+        assert_eq!((image.width(), image.height()), (2, 2));
+        assert_eq!(pixel(&image, 0, 1), RED);
+        assert_eq!(pixel(&image, 1, 1), [255, 0, 0, 128]);
+    }
+
+    #[test]
+    fn decode_grayscale_jxl() {
+        let image = decode(&fixture("gray-2x2.jxl")).unwrap();
+        assert_eq!(pixel(&image, 0, 0), [0, 0, 0, 255]);
+        assert_eq!(pixel(&image, 1, 0), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn decode_detects_jxl_from_contents() {
+        let image = decode(&fixture("jxl-named.png")).unwrap();
+        assert_eq!(image.into_pixels(), RED.repeat(6));
+    }
+
+    #[test]
+    fn decode_fails_on_truncated_jxl() {
+        assert!(decode(&fixture("truncated.jxl")).is_err());
+    }
+
+    #[test]
     fn decode_fails_on_corrupt_file() {
         assert!(decode(&fixture("truncated.png")).is_err());
     }
@@ -164,7 +210,9 @@ mod tests {
 
     #[test]
     fn supported_extensions() {
-        for name in ["a.png", "a.jpg", "a.JPG", "a.Jpeg", "a.webp", "a.gif"] {
+        for name in [
+            "a.png", "a.jpg", "a.JPG", "a.Jpeg", "a.webp", "a.gif", "a.jxl", "a.JXL",
+        ] {
             assert!(is_supported_image(Path::new(name)), "{name}");
         }
     }

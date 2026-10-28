@@ -4,7 +4,13 @@ use crate::TabId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TabContent {
-    Viewer { path: PathBuf },
+    Viewer {
+        path: PathBuf,
+    },
+    /// Shows the contents of `dir`.
+    Explorer {
+        dir: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,5 +32,9 @@ impl Tab {
     #[must_use]
     pub fn content(&self) -> &TabContent {
         &self.content
+    }
+
+    pub(crate) fn set_content(&mut self, content: TabContent) {
+        self.content = content;
     }
 }

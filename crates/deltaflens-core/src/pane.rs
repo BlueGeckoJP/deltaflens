@@ -1,6 +1,6 @@
 use eyre::{Result, eyre};
 
-use crate::{Tab, TabId};
+use crate::{Tab, TabContent, TabId};
 
 /// A row of tabs with at most one active tab.
 #[derive(Debug, Clone, Default)]
@@ -55,6 +55,17 @@ impl Pane {
         Ok(())
     }
 
+    /// Replaces what the tab shows, for example when moving to the next image.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pane has no tab with `id`.
+    pub fn set_tab_content(&mut self, id: TabId, content: TabContent) -> Result<()> {
+        let index = self.index_of(id)?;
+        self.tabs[index].set_content(content);
+        Ok(())
+    }
+
     /// Activates the next tab, wrapping around at the end. Does nothing if the
     /// pane has no tabs.
     pub fn activate_next_tab(&mut self) {
@@ -84,7 +95,6 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::TabContent;
 
     fn tab(id: u64) -> Tab {
         Tab::new(
@@ -189,6 +199,29 @@ mod tests {
         let mut pane = pane_with_tabs(2);
         assert!(pane.activate_tab(TabId(9)).is_err());
         assert_eq!(active_id(&pane), Some(1));
+    }
+
+    #[test]
+    fn set_tab_content_replaces_only_that_tab() {
+        let mut pane = pane_with_tabs(2);
+        let content = TabContent::Viewer {
+            path: PathBuf::from("new.jxl"),
+        };
+        pane.set_tab_content(TabId(0), content.clone()).unwrap();
+        assert_eq!(pane.tabs()[0].content(), &content);
+        assert_eq!(pane.tabs()[1].content(), tab(1).content());
+        assert_eq!(tab_ids(&pane), vec![0, 1]);
+        assert_eq!(active_id(&pane), Some(1));
+    }
+
+    #[test]
+    fn set_content_of_missing_tab_fails() {
+        let mut pane = pane_with_tabs(1);
+        let content = TabContent::Viewer {
+            path: PathBuf::from("new.jxl"),
+        };
+        assert!(pane.set_tab_content(TabId(9), content).is_err());
+        assert_eq!(pane.tabs()[0], tab(0));
     }
 
     #[test]
