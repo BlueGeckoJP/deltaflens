@@ -17,6 +17,7 @@ use gpui::{
 
 use crate::{
     explorer::{DraggedImage, Explorer, ExplorerEvent},
+    images::Images,
     thumbnails::Thumbnails,
     viewer::Viewer,
     window_frame::{self, ROUNDING},
@@ -162,6 +163,7 @@ pub struct WorkspaceView {
     workspace: Workspace,
     views: HashMap<TabId, TabView>,
     thumbnails: Entity<Thumbnails>,
+    images: Entity<Images>,
     focus_handle: FocusHandle,
     /// The window title last set, to avoid setting it on every frame.
     title: String,
@@ -182,6 +184,7 @@ impl WorkspaceView {
             workspace: Workspace::new(),
             views: HashMap::new(),
             thumbnails: cx.new(Thumbnails::new),
+            images: cx.new(Images::new),
             focus_handle,
             title: APP_NAME.to_owned(),
             move_pending: false,
@@ -210,6 +213,24 @@ impl WorkspaceView {
             tracing::error!("{error:#}");
         }
         self.sync_views(window, cx);
+    }
+
+    /// Tells each viewer whether its tab is on screen: the active tab of a
+    /// pane. Hidden viewers let go of their images.
+    fn update_visibility(&self, cx: &mut Context<Self>) {
+        let visible: Vec<TabId> = self
+            .workspace
+            .layout()
+            .pane_ids()
+            .into_iter()
+            .filter_map(|pane_id| self.workspace.pane(pane_id).ok()?.active_tab().map(Tab::id))
+            .collect();
+        for (tab_id, view) in &self.views {
+            if let TabView::Viewer(viewer) = view {
+                let visible = visible.contains(tab_id);
+                viewer.update(cx, |viewer, cx| viewer.set_visible(visible, cx));
+            }
+        }
     }
 
     /// Creates the views of tabs that have none, and releases the views of
@@ -241,7 +262,8 @@ impl WorkspaceView {
     ) -> TabView {
         match content {
             TabContent::Viewer { path } => {
-                TabView::Viewer(cx.new(|cx| Viewer::new(path, window, cx)))
+                let images = self.images.clone();
+                TabView::Viewer(cx.new(|cx| Viewer::new(path, images, cx)))
             }
             TabContent::Explorer { dir } => {
                 let thumbnails = self.thumbnails.clone();
@@ -296,7 +318,7 @@ impl WorkspaceView {
     fn open_in_active_tab(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         match self.active_tab().map(Tab::id) {
             Some(tab_id) if matches!(self.views.get(&tab_id), Some(TabView::Viewer(_))) => {
-                if let Err(error) = self.show_in_viewer(tab_id, path, window, cx) {
+                if let Err(error) = self.show_in_viewer(tab_id, path, Direction::Next, cx) {
                     tracing::error!("{error:#}");
                 }
             }
@@ -304,12 +326,12 @@ impl WorkspaceView {
         }
     }
 
-    /// Shows `path` in a viewer tab.
+    /// Shows `path` in a viewer tab, reached by moving in `direction`.
     fn show_in_viewer(
         &mut self,
         tab_id: TabId,
         path: PathBuf,
-        window: &mut Window,
+        direction: Direction,
         cx: &mut Context<Self>,
     ) -> Result<()> {
         let Some(TabView::Viewer(viewer)) = self.views.get(&tab_id) else {
@@ -317,7 +339,7 @@ impl WorkspaceView {
         };
         let viewer = viewer.clone();
         self.set_tab_content(tab_id, TabContent::Viewer { path: path.clone() })?;
-        viewer.update(cx, |viewer, cx| viewer.load(path, window, cx));
+        viewer.update(cx, |viewer, cx| viewer.load(path, direction, cx));
         cx.notify();
         Ok(())
     }
@@ -359,21 +381,16 @@ impl WorkspaceView {
         }
     }
 
-    fn previous_image(&mut self, _: &PreviousImage, window: &mut Window, cx: &mut Context<Self>) {
-        self.move_in_folder(Direction::Previous, window, cx);
+    fn previous_image(&mut self, _: &PreviousImage, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_in_folder(Direction::Previous, cx);
     }
 
-    fn next_image(&mut self, _: &NextImage, window: &mut Window, cx: &mut Context<Self>) {
-        self.move_in_folder(Direction::Next, window, cx);
+    fn next_image(&mut self, _: &NextImage, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_in_folder(Direction::Next, cx);
     }
 
     /// Shows the previous or next image of the folder in the active tab.
-    fn move_in_folder(
-        &mut self,
-        direction: Direction,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn move_in_folder(&mut self, direction: Direction, cx: &mut Context<Self>) {
         let Some(tab_id) = self.active_tab().map(Tab::id) else {
             return;
         };
@@ -383,7 +400,7 @@ impl WorkspaceView {
         else {
             return;
         };
-        if let Err(error) = self.show_in_viewer(tab_id, path, window, cx) {
+        if let Err(error) = self.show_in_viewer(tab_id, path, direction, cx) {
             tracing::error!("{error:#}");
         }
     }
@@ -1305,6 +1322,7 @@ fn tab_name(tab: &Tab) -> String {
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.update_title(window);
+        self.update_visibility(cx);
         // A drag that ended outside every pane leaves nothing to show.
         if !cx.has_active_drag() {
             self.drop_target = None;

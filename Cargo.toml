@@ -18,6 +18,10 @@ image = { version = "0.25", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# For `mallopt`, which glibc offers but the standard library does not.
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+libc = "0.2"
+
 [lints]
 workspace = true
 
@@ -25,6 +29,11 @@ workspace = true
 # release builds, so optimize dependencies even in dev builds.
 [profile.dev.package."*"]
 opt-level = 3
+
+# The resizing of fast_image_resize is generic and compiled in deltaflens-core,
+# where it was about 70 times slower than in release builds.
+[profile.dev.package.deltaflens-core]
+opt-level = 1
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

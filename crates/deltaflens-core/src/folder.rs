@@ -5,7 +5,7 @@ use std::{
 
 use eyre::{Result, WrapErr};
 
-use crate::is_supported_image;
+use crate::{explorer::is_hidden, is_supported_image};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
@@ -14,7 +14,8 @@ pub enum Direction {
 }
 
 /// Lists the files in `dir` that [`is_supported_image`] accepts, in natural
-/// order of their file names.
+/// order of their file names. Hidden files, whose names start with a dot, are
+/// left out as in the explorer.
 ///
 /// # Errors
 ///
@@ -28,7 +29,7 @@ fn list_images_inner(dir: &Path) -> Result<Vec<PathBuf>> {
     for entry in dir.read_dir()? {
         let path = entry?.path();
         // `is_file` follows symbolic links.
-        if is_supported_image(&path) && path.is_file() {
+        if !is_hidden(&path) && is_supported_image(&path) && path.is_file() {
             images.push(path);
         }
     }
@@ -60,6 +61,41 @@ pub fn neighbor_image<'a>(
         }
     };
     Some(&images[next % images.len()])
+}
+
+/// Returns the images to decode ahead of time around `current`, the most
+/// likely to be shown next first: up to `count` images in `direction`, then up
+/// to `count` images the other way. `images` must be sorted by
+/// [`list_images`]. Wraps around at both ends like [`neighbor_image`].
+///
+/// Neither `current` nor any image is returned twice, so a small folder gives
+/// fewer images.
+#[must_use]
+pub fn prefetch_images<'a>(
+    images: &'a [PathBuf],
+    current: &Path,
+    direction: Direction,
+    count: usize,
+) -> Vec<&'a Path> {
+    let opposite = match direction {
+        Direction::Previous => Direction::Next,
+        Direction::Next => Direction::Previous,
+    };
+    let mut prefetch: Vec<&Path> = Vec::new();
+    for direction in [direction, opposite] {
+        let mut from = current;
+        for _ in 0..count {
+            let Some(image) = neighbor_image(images, from, direction) else {
+                break;
+            };
+            if image == current || prefetch.contains(&image) {
+                break;
+            }
+            prefetch.push(image);
+            from = image;
+        }
+    }
+    prefetch
 }
 
 /// Natural, case-insensitive order of file names. Ties are broken so that the
@@ -114,6 +150,31 @@ mod tests {
         fs::create_dir(dir.path().join("folder.png")).unwrap();
         let images = list_images(dir.path()).unwrap();
         assert_eq!(dir.names(&images), ["a.png"]);
+    }
+
+    #[test]
+    fn list_images_skips_hidden_files() {
+        let dir = TempDir::with_files("folder-hidden", &["a.png", ".b.png", "c.png"]);
+        let images = list_images(dir.path()).unwrap();
+        assert_eq!(dir.names(&images), ["a.png", "c.png"]);
+    }
+
+    #[test]
+    fn hidden_image_moves_to_the_images_around_it() {
+        let dir = TempDir::with_files("folder-hidden-neighbor", &["a.png", ".b.png", "c.png"]);
+        let images = list_images(dir.path()).unwrap();
+        let hidden = dir.path().join(".b.png");
+        let name = |path: &Path| path.file_name().unwrap().to_string_lossy().into_owned();
+        // ".b.png" sorts before "a.png", as the dot comes first.
+        let next = neighbor_image(&images, &hidden, Direction::Next).unwrap();
+        assert_eq!(name(next), "a.png");
+        let previous = neighbor_image(&images, &hidden, Direction::Previous).unwrap();
+        assert_eq!(name(previous), "c.png");
+        let prefetch: Vec<String> = prefetch_images(&images, &hidden, Direction::Next, 2)
+            .into_iter()
+            .map(name)
+            .collect();
+        assert_eq!(prefetch, ["a.png", "c.png"]);
     }
 
     #[test]
@@ -200,5 +261,71 @@ mod tests {
     #[test]
     fn neighbor_in_empty_list_is_none() {
         assert_eq!(neighbor(&[], "a.png", Direction::Next), None);
+    }
+
+    fn prefetch(images: &[PathBuf], current: &str, direction: Direction) -> Vec<String> {
+        prefetch_images(images, &Path::new("/d").join(current), direction, 2)
+            .into_iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn prefetch_puts_the_direction_of_travel_first() {
+        let images = paths(&["a.png", "b.png", "c.png", "d.png", "e.png", "f.png"]);
+        assert_eq!(
+            prefetch(&images, "c.png", Direction::Next),
+            ["d.png", "e.png", "b.png", "a.png"]
+        );
+        assert_eq!(
+            prefetch(&images, "c.png", Direction::Previous),
+            ["b.png", "a.png", "d.png", "e.png"]
+        );
+    }
+
+    #[test]
+    fn prefetch_wraps_around_at_the_ends() {
+        let images = paths(&["a.png", "b.png", "c.png", "d.png", "e.png", "f.png"]);
+        assert_eq!(
+            prefetch(&images, "f.png", Direction::Next),
+            ["a.png", "b.png", "e.png", "d.png"]
+        );
+        assert_eq!(
+            prefetch(&images, "a.png", Direction::Next),
+            ["b.png", "c.png", "f.png", "e.png"]
+        );
+    }
+
+    #[test]
+    fn prefetch_in_small_folder_gives_each_image_once() {
+        let images = paths(&["a.png", "b.png", "c.png"]);
+        assert_eq!(
+            prefetch(&images, "a.png", Direction::Next),
+            ["b.png", "c.png"]
+        );
+        let images = paths(&["a.png", "b.png"]);
+        assert_eq!(prefetch(&images, "a.png", Direction::Previous), ["b.png"]);
+    }
+
+    #[test]
+    fn prefetch_in_folder_of_one_image_is_empty() {
+        let images = paths(&["a.png"]);
+        assert_eq!(
+            prefetch(&images, "a.png", Direction::Next),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn prefetch_of_missing_image_uses_its_position() {
+        let images = paths(&["a.png", "c.png", "e.png"]);
+        assert_eq!(
+            prefetch(&images, "d.png", Direction::Next),
+            ["e.png", "a.png", "c.png"]
+        );
+        assert_eq!(
+            prefetch(&[], "a.png", Direction::Next),
+            Vec::<String>::new()
+        );
     }
 }
