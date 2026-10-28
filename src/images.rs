@@ -5,8 +5,8 @@ use std::{
     time::SystemTime,
 };
 
-use deltaflens_core::{LruCache, decode};
-use eyre::Result;
+use deltaflens_core::{DecodedImage, LruCache, decode, downscale};
+use eyre::{Result, eyre};
 use gpui::{AppContext as _, Context, EntityId, EventEmitter, RenderImage, SharedString, Task};
 
 use crate::render_image::to_render_image;
@@ -18,12 +18,15 @@ const CACHE_BYTES: usize = 1024 * 1024 * 1024;
 /// images asked for to be shown now are not kept waiting.
 const MAX_PARALLEL_PREFETCH: usize = 2;
 
-/// Identifies a decoded image.
+/// Identifies a decoded image, or a downscaled version of it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ImageKey {
     pub path: PathBuf,
     /// Makes a changed file get decoded again.
     pub modified: Option<SystemTime>,
+    /// The size in pixels the image is downscaled to, or `None` for the image
+    /// as decoded.
+    pub downscaled: Option<(u32, u32)>,
 }
 
 impl ImageKey {
@@ -32,19 +35,43 @@ impl ImageKey {
             .metadata()
             .and_then(|metadata| metadata.modified())
             .ok();
-        Self { path, modified }
+        Self {
+            path,
+            modified,
+            downscaled: None,
+        }
+    }
+
+    /// The key of the image downscaled to `size`.
+    #[must_use]
+    pub fn downscaled(&self, size: (u32, u32)) -> Self {
+        Self {
+            downscaled: Some(size),
+            ..self.original()
+        }
+    }
+
+    /// The key of the image as decoded.
+    #[must_use]
+    pub fn original(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+            modified: self.modified,
+            downscaled: None,
+        }
     }
 }
 
 /// What a viewer asks for.
 #[derive(Debug, Default)]
 pub struct Request {
-    /// The image it shows, which must not be evicted. It may be the previous
-    /// image while `current` is decoded.
-    pub shown: Option<ImageKey>,
-    /// The image to show now. It is not evicted either, so that it can be
-    /// shown once decoded.
-    pub current: Option<ImageKey>,
+    /// The images it shows, which must not be evicted. They may be of the
+    /// previous image while `current` is decoded.
+    pub shown: Vec<ImageKey>,
+    /// The images to show now: the image, and a downscaled version of it once
+    /// it is decoded. They are not evicted either, so that they can be shown
+    /// once made.
+    pub current: Vec<ImageKey>,
     /// The images it may show next, the most likely first.
     pub prefetch: Vec<ImageKey>,
 }
@@ -129,7 +156,7 @@ impl Images {
         let shown: HashSet<ImageKey> = self
             .requests
             .values()
-            .filter_map(|request| request.shown.clone())
+            .flat_map(|request| request.shown.iter().cloned())
             .collect();
         // The images no longer shown stay in memory, but their textures are
         // freed, as they would double the memory used for them. Showing them
@@ -143,7 +170,7 @@ impl Images {
         let pinned = self
             .requests
             .values()
-            .filter_map(|request| request.current.clone())
+            .flat_map(|request| request.current.iter().cloned())
             .chain(shown.iter().cloned())
             .collect();
         self.shown = shown;
@@ -153,7 +180,7 @@ impl Images {
         let current: Vec<ImageKey> = self
             .requests
             .values()
-            .filter_map(|request| request.current.clone())
+            .flat_map(|request| request.current.iter().cloned())
             .collect();
         let prefetch: Vec<ImageKey> = self
             .requests
@@ -185,8 +212,8 @@ impl Images {
         }
     }
 
-    /// Starts decoding the image of `key`, unless it is decoded, being decoded,
-    /// or failed to decode.
+    /// Starts decoding the image of `key`, or downscaling it once it is
+    /// decoded, unless that is done, being done, or failed.
     fn start(&mut self, key: &ImageKey, cx: &mut Context<Self>) {
         if self.cache.contains(key)
             || self.in_progress.contains_key(key)
@@ -194,13 +221,27 @@ impl Images {
         {
             return;
         }
+        let source = match key.downscaled {
+            Some(_) => match self.cache.peek(&key.original()) {
+                Some(image) => Some(image.clone()),
+                // Started once the image is decoded.
+                None => return,
+            },
+            None => None,
+        };
         let task = cx.spawn({
             let key = key.clone();
             async move |this, cx| {
                 let result = cx
                     .background_spawn({
-                        let path = key.path.clone();
-                        async move { decode(&path).and_then(to_render_image) }
+                        let key = key.clone();
+                        async move {
+                            match (source, key.downscaled) {
+                                (Some(source), Some(size)) => downscale_image(&source, size),
+                                _ => decode(&key.path),
+                            }
+                            .and_then(to_render_image)
+                        }
                     })
                     .await;
                 // Fails only if the images are gone.
@@ -242,4 +283,16 @@ impl Images {
             }
         });
     }
+}
+
+/// Downscales `image` to `size` with a Lanczos3 filter.
+fn downscale_image(image: &RenderImage, size: (u32, u32)) -> Result<DecodedImage> {
+    let source = image.size(0);
+    let bytes = image
+        .as_bytes(0)
+        .ok_or_else(|| eyre!("the image has no pixels"))?;
+    // Sizes of images are never negative.
+    #[expect(clippy::cast_sign_loss)]
+    let source = (source.width.0 as u32, source.height.0 as u32);
+    downscale(bytes, source, size)
 }

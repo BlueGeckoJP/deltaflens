@@ -1,9 +1,12 @@
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
-use deltaflens_core::{Direction, ViewTransform, list_images, neighbor_image, prefetch_images};
+use deltaflens_core::{
+    Direction, ViewTransform, downscaled_size, list_images, neighbor_image, prefetch_images,
+};
 use gpui::{
     Bounds, Context, CursorStyle, DispatchPhase, Entity, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, RenderImage, ScrollDelta, ScrollEvent, SharedString,
@@ -20,6 +23,9 @@ const LINES_PER_ZOOM_STEP: f32 = 3.0;
 const PIXELS_PER_ZOOM_STEP: f32 = 50.0;
 /// How many images on each side of the current one to decode ahead of time.
 const PREFETCH_COUNT: usize = 2;
+/// How long the scale must stay the same before a downscaled image is made
+/// for it, so that zooming and resizing do not make one at every step.
+const DOWNSCALE_DELAY: Duration = Duration::from_millis(200);
 
 /// Shows one image, fitted to the viewer or zoomed and panned by the user.
 pub struct Viewer {
@@ -32,6 +38,14 @@ pub struct Viewer {
     /// The image of `key`, or of the previous key while `key` is loading.
     /// `None` while the tab is hidden, so that only [`Images`] holds it.
     image: Option<(ImageKey, Arc<RenderImage>)>,
+    /// A smaller version of `image`, drawn instead of it while it is shown at
+    /// most that large.
+    downscaled: Option<(ImageKey, Arc<RenderImage>)>,
+    /// The smaller version asked for, for the current scale.
+    wanted_downscaled: Option<ImageKey>,
+    /// Asks for the smaller version for a new scale once it stays the same.
+    /// Dropping it cancels that.
+    downscale_task: Option<(Option<ImageKey>, Task<()>)>,
     error: Option<SharedString>,
     /// Whether the tab is on screen. A hidden viewer keeps only its path.
     visible: bool,
@@ -68,13 +82,13 @@ impl Viewer {
         .detach();
 
         let mut this = Self {
-            key: ImageKey {
-                path: PathBuf::new(),
-                modified: None,
-            },
+            key: ImageKey::new(PathBuf::new()),
             direction: Direction::Next,
             images,
             image: None,
+            downscaled: None,
+            wanted_downscaled: None,
+            downscale_task: None,
             error: None,
             visible: false,
             transform: ViewTransform::default(),
@@ -93,6 +107,8 @@ impl Viewer {
     pub fn load(&mut self, path: PathBuf, direction: Direction, cx: &mut Context<Self>) {
         self.key = ImageKey::new(path);
         self.direction = direction;
+        self.wanted_downscaled = None;
+        self.downscale_task = None;
         self.list_folder(cx);
         if self.visible {
             self.show_decoded(cx);
@@ -111,6 +127,9 @@ impl Viewer {
             self.show_decoded(cx);
         } else {
             self.image = None;
+            self.downscaled = None;
+            self.wanted_downscaled = None;
+            self.downscale_task = None;
         }
         self.request(cx);
         cx.notify();
@@ -135,8 +154,15 @@ impl Viewer {
     fn request(&self, cx: &mut Context<Self>) {
         let request = if self.visible {
             Request {
-                shown: self.image.as_ref().map(|(key, _)| key.clone()),
-                current: Some(self.key.clone()),
+                shown: [&self.image, &self.downscaled]
+                    .into_iter()
+                    .flatten()
+                    .map(|(key, _)| key.clone())
+                    .collect(),
+                current: [Some(self.key.clone()), self.wanted_downscaled.clone()]
+                    .into_iter()
+                    .flatten()
+                    .collect(),
                 prefetch: self.folder_images().map_or_default(|images| {
                     prefetch_images(images, &self.key.path, self.direction, PREFETCH_COUNT)
                         .into_iter()
@@ -153,11 +179,84 @@ impl Viewer {
     }
 
     fn on_images_event(&mut self, event: &ImagesEvent, cx: &mut Context<Self>) {
-        let (ImagesEvent::Loaded(key) | ImagesEvent::Failed(key)) = event;
-        if self.visible && *key == self.key {
-            self.show_decoded(cx);
-            self.request(cx);
+        if !self.visible {
+            return;
         }
+        match event {
+            ImagesEvent::Loaded(key) | ImagesEvent::Failed(key) if *key == self.key => {
+                self.show_decoded(cx);
+                self.request(cx);
+            }
+            ImagesEvent::Loaded(key) if Some(key) == self.wanted_downscaled.as_ref() => {
+                let image = self.images.update(cx, |images, _| images.get(key));
+                if let Some(image) = image {
+                    self.downscaled = Some((key.clone(), image));
+                    self.request(cx);
+                    cx.notify();
+                }
+            }
+            // Without the smaller version, the image itself is drawn.
+            ImagesEvent::Loaded(_) | ImagesEvent::Failed(_) => {}
+        }
+    }
+
+    /// Notes the bounds of the viewer, and asks for a smaller version of the
+    /// image for the scale it is shown at, once that stays the same for
+    /// [`DOWNSCALE_DELAY`]. One already made is used at once.
+    fn on_layout(&mut self, bounds: Bounds<Pixels>, scale_factor: f32, cx: &mut Context<Self>) {
+        self.viewport = Some((bounds, scale_factor));
+        let wanted = self.downscaled_key();
+        if wanted == self.wanted_downscaled {
+            // Back to the scale before a change that did not last.
+            self.downscale_task = None;
+            return;
+        }
+        let waiting = self
+            .downscale_task
+            .as_ref()
+            .is_some_and(|(key, _)| *key == wanted);
+        if waiting {
+            return;
+        }
+        let made = wanted
+            .as_ref()
+            .and_then(|key| self.images.update(cx, |images, _| images.get(key)));
+        if wanted.is_none() || made.is_some() {
+            self.downscale_task = None;
+            self.wanted_downscaled.clone_from(&wanted);
+            self.downscaled = wanted.zip(made);
+            self.request(cx);
+            cx.notify();
+            return;
+        }
+        let task = cx.spawn({
+            let wanted = wanted.clone();
+            async move |this, cx| {
+                cx.background_executor().timer(DOWNSCALE_DELAY).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.downscale_task = None;
+                    this.wanted_downscaled = wanted;
+                    this.request(cx);
+                });
+            }
+        });
+        self.downscale_task = Some((wanted, task));
+    }
+
+    /// The key of the smaller version of the current image for the scale it is
+    /// shown at, or `None` if the image itself is to be drawn.
+    fn downscaled_key(&self) -> Option<ImageKey> {
+        let (key, image) = self.image.as_ref().filter(|(key, _)| *key == self.key)?;
+        let (image_size, viewport) = self.sizes()?;
+        // The scale of logical sizes is also that of device pixels shown to
+        // image pixels.
+        let scale = self.transform.scale(image_size, viewport);
+        let size = image.size(0);
+        let (width, height) = (
+            u32::try_from(size.width.0).ok()?,
+            u32::try_from(size.height.0).ok()?,
+        );
+        downscaled_size(width, height, scale).map(|size| key.downscaled(size))
     }
 
     /// Lists the folder of the current image in the background, unless it is
@@ -214,6 +313,13 @@ impl Viewer {
     }
 
     fn show(&mut self, image: Arc<RenderImage>, cx: &mut Context<Self>) {
+        if self
+            .downscaled
+            .as_ref()
+            .is_some_and(|(key, _)| key.original() != self.key)
+        {
+            self.downscaled = None;
+        }
         if self.placed.as_ref() != Some(&self.key) {
             self.transform.reset();
             self.placed = Some(self.key.clone());
@@ -225,6 +331,7 @@ impl Viewer {
 
     fn show_error(&mut self, error: SharedString, cx: &mut Context<Self>) {
         self.image = None;
+        self.downscaled = None;
         self.error = Some(error);
         self.transform.reset();
         self.placed = None;
@@ -283,13 +390,25 @@ impl Viewer {
     }
 
     fn paint(&self, bounds: Bounds<Pixels>, window: &mut Window) {
-        let Some((_, image)) = &self.image else {
+        let Some((key, image)) = &self.image else {
             return;
         };
         let rect = self.transform.image_rect(
             image_size(image, window.scale_factor()),
             to_core_size(bounds.size),
         );
+        // The smaller version is drawn while it has at least as many pixels as
+        // the screen shows, so that it is not enlarged.
+        let image = match &self.downscaled {
+            Some((downscaled_key, downscaled))
+                if downscaled_key.original() == *key
+                    && image_size(downscaled, window.scale_factor()).width + 0.5
+                        >= rect.size.width =>
+            {
+                downscaled
+            }
+            _ => image,
+        };
         let image_bounds = Bounds::new(
             bounds.origin + point(px(rect.origin.x), px(rect.origin.y)),
             size(px(rect.size.width), px(rect.size.height)),
@@ -323,8 +442,8 @@ impl Render for Viewer {
                     {
                         let view = view.clone();
                         move |bounds, window, cx| {
-                            view.update(cx, |this, _| {
-                                this.viewport = Some((bounds, window.scale_factor()));
+                            view.update(cx, |this, cx| {
+                                this.on_layout(bounds, window.scale_factor(), cx);
                             });
                         }
                     },

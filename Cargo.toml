@@ -30,5 +30,10 @@ workspace = true
 [profile.dev.package."*"]
 opt-level = 3
 
+# The resizing of fast_image_resize is generic and compiled in deltaflens-core,
+# where it was about 70 times slower than in release builds.
+[profile.dev.package.deltaflens-core]
+opt-level = 1
+
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

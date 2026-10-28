@@ -21,6 +21,16 @@ pub struct DecodedImage {
 }
 
 impl DecodedImage {
+    /// `pixels` must hold `width` x `height` BGRA pixels.
+    pub(crate) fn new(width: u32, height: u32, pixels: Vec<u8>) -> Self {
+        debug_assert_eq!(pixels.len(), width as usize * height as usize * 4);
+        Self {
+            width,
+            height,
+            pixels,
+        }
+    }
+
     #[must_use]
     pub fn width(&self) -> u32 {
         self.width

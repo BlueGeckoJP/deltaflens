@@ -25,6 +25,8 @@ image = { version = "0.25", default-features = false, features = [
     "tiff",
     "webp",
 ] }
+# Lanczos3 resizing with SIMD, several times faster than `image::imageops`.
+fast_image_resize = { version = "6", features = ["only_u8x4"] }
 jxl-oxide = "0.12"
 # For the file names of the freedesktop thumbnail cache.
 md-5 = "0.10"
