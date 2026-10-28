@@ -692,6 +692,9 @@ impl WorkspaceView {
                 format!("divider-{path:?}-{boundary}").into(),
             ))
             .absolute()
+            // Keep presses on the line from also panning a viewer or moving the
+            // window under it.
+            .occlude()
             .hover(|style| style.bg(rgb(FOCUS_COLOR)))
             .on_drag(dragged, |_, _, _, cx| cx.new(|_| DragPreview))
             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
