@@ -1260,6 +1260,7 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "image",
+ "libc",
  "tracing",
  "tracing-subscriber",
 ]

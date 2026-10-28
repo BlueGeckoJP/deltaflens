@@ -36,12 +36,17 @@ impl ImageKey {
     }
 }
 
-/// What a viewer asks for: the image it shows now, and the images it may show
-/// next, the most likely first.
+/// What a viewer asks for.
 #[derive(Debug, Default)]
-struct Request {
-    current: Option<ImageKey>,
-    prefetch: Vec<ImageKey>,
+pub struct Request {
+    /// The image it shows, which must not be evicted. It may be the previous
+    /// image while `current` is decoded.
+    pub shown: Option<ImageKey>,
+    /// The image to show now. It is not evicted either, so that it can be
+    /// shown once decoded.
+    pub current: Option<ImageKey>,
+    /// The images it may show next, the most likely first.
+    pub prefetch: Vec<ImageKey>,
 }
 
 pub enum ImagesEvent {
@@ -54,6 +59,9 @@ pub enum ImagesEvent {
 /// Decodes images in the background for the viewers of a window and keeps the
 /// recently used ones in memory, so that moving between images does not wait
 /// for them to be decoded again.
+///
+/// The viewers do not keep images of their own: the images on screen are
+/// pinned in the cache, and a viewer whose tab is hidden asks for nothing.
 pub struct Images {
     cache: LruCache<ImageKey, Arc<RenderImage>>,
     /// By the viewer that asks.
@@ -66,6 +74,8 @@ pub struct Images {
     /// time, even if evicted. Otherwise images that do not all fit in the
     /// cache would evict one another and be decoded over and over.
     prefetched: HashSet<ImageKey>,
+    /// The images the viewers show, whose textures are on the GPU.
+    shown: HashSet<ImageKey>,
 }
 
 impl EventEmitter<ImagesEvent> for Images {}
@@ -84,17 +94,13 @@ impl Images {
             in_progress: HashMap::new(),
             failed: HashMap::new(),
             prefetched: HashSet::new(),
+            shown: HashSet::new(),
         }
     }
 
     /// Returns the image if it is decoded, and marks it as recently used.
     pub fn get(&mut self, key: &ImageKey) -> Option<Arc<RenderImage>> {
         self.cache.get(key).cloned()
-    }
-
-    #[must_use]
-    pub fn contains(&self, key: &ImageKey) -> bool {
-        self.cache.contains(key)
     }
 
     /// Why the image could not be decoded, if it could not.
@@ -105,14 +111,8 @@ impl Images {
 
     /// Replaces what `viewer` asks for. Decoding images that nobody asks for
     /// any longer is canceled.
-    pub fn request(
-        &mut self,
-        viewer: EntityId,
-        current: Option<ImageKey>,
-        prefetch: Vec<ImageKey>,
-        cx: &mut Context<Self>,
-    ) {
-        self.requests.insert(viewer, Request { current, prefetch });
+    pub fn request(&mut self, viewer: EntityId, request: Request, cx: &mut Context<Self>) {
+        self.requests.insert(viewer, request);
         self.schedule(cx);
     }
 
@@ -122,10 +122,34 @@ impl Images {
         self.schedule(cx);
     }
 
-    /// Cancels the decoding of images nobody asks for, and starts decoding the
-    /// ones asked for: all images to be shown now, then images to be shown
-    /// next, a few at a time.
+    /// Pins the images shown or to be shown, cancels the decoding of images
+    /// nobody asks for, and starts decoding the ones asked for: all images to
+    /// be shown now, then images to be shown next, a few at a time.
     fn schedule(&mut self, cx: &mut Context<Self>) {
+        let shown: HashSet<ImageKey> = self
+            .requests
+            .values()
+            .filter_map(|request| request.shown.clone())
+            .collect();
+        // The images no longer shown stay in memory, but their textures are
+        // freed, as they would double the memory used for them. Showing them
+        // again uploads them again.
+        let hidden: Vec<Arc<RenderImage>> = self
+            .shown
+            .difference(&shown)
+            .filter_map(|key| self.cache.peek(key).cloned())
+            .collect();
+        Self::release(hidden, cx);
+        let pinned = self
+            .requests
+            .values()
+            .filter_map(|request| request.current.clone())
+            .chain(shown.iter().cloned())
+            .collect();
+        self.shown = shown;
+        let evicted = self.cache.set_pinned(pinned);
+        Self::release(evicted.into_iter().map(|(_, image)| image).collect(), cx);
+
         let current: Vec<ImageKey> = self
             .requests
             .values()
@@ -193,9 +217,8 @@ impl Images {
                 // Forgotten by `schedule` unless it is asked for ahead of time.
                 self.prefetched.insert(key.clone());
                 let bytes = image.as_bytes(0).map_or(0, <[u8]>::len);
-                for (_, evicted) in self.cache.insert(key.clone(), image, bytes) {
-                    cx.drop_image(evicted, None);
-                }
+                let evicted = self.cache.insert(key.clone(), image, bytes);
+                Self::release(evicted.into_iter().map(|(_, image)| image).collect(), cx);
                 cx.emit(ImagesEvent::Loaded(key));
             }
             Err(error) => {
@@ -205,5 +228,18 @@ impl Images {
             }
         }
         self.schedule(cx);
+    }
+
+    /// Frees the textures of `images`, if they have any.
+    fn release(images: Vec<Arc<RenderImage>>, cx: &mut Context<Self>) {
+        if images.is_empty() {
+            return;
+        }
+        // Wait until no window is being updated, as `drop_image` would miss it.
+        cx.defer(move |cx| {
+            for image in images {
+                cx.drop_image(image, None);
+            }
+        });
     }
 }

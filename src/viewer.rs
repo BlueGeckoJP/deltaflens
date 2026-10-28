@@ -5,12 +5,12 @@ use std::{
 
 use deltaflens_core::{Direction, ViewTransform, list_images, neighbor_image, prefetch_images};
 use gpui::{
-    App, Bounds, Context, CursorStyle, DispatchPhase, Entity, MouseButton, MouseDownEvent,
+    Bounds, Context, CursorStyle, DispatchPhase, Entity, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, RenderImage, ScrollDelta, ScrollEvent, SharedString,
     Task, Window, canvas, div, point, prelude::*, px, rgb, size,
 };
 
-use crate::images::{ImageKey, Images, ImagesEvent};
+use crate::images::{ImageKey, Images, ImagesEvent, Request};
 
 /// How much one wheel notch zooms.
 const ZOOM_STEP: f32 = 1.2;
@@ -30,9 +30,15 @@ pub struct Viewer {
     direction: Direction,
     images: Entity<Images>,
     /// The image of `key`, or of the previous key while `key` is loading.
+    /// `None` while the tab is hidden, so that only [`Images`] holds it.
     image: Option<(ImageKey, Arc<RenderImage>)>,
     error: Option<SharedString>,
+    /// Whether the tab is on screen. A hidden viewer keeps only its path.
+    visible: bool,
     transform: ViewTransform,
+    /// The image `transform` was set for, kept while the tab is hidden so
+    /// that the zoom stays when it is shown again.
+    placed: Option<ImageKey>,
     /// The bounds and scale factor of the last frame, used by input handlers.
     viewport: Option<(Bounds<Pixels>, f32)>,
     /// The last mouse position while panning.
@@ -50,20 +56,14 @@ struct Folder {
 }
 
 impl Viewer {
-    pub fn new(
-        path: PathBuf,
-        images: Entity<Images>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(path: PathBuf, images: Entity<Images>, cx: &mut Context<Self>) -> Self {
         let id = cx.entity_id();
-        cx.on_release_in(window, move |this, window, cx| {
+        cx.on_release(move |this, cx| {
             this.images.update(cx, |images, cx| images.forget(id, cx));
-            this.release_image(window, cx);
         })
         .detach();
-        cx.subscribe_in(&images, window, |this, _, event, window, cx| {
-            this.on_images_event(event, window, cx);
+        cx.subscribe(&images, |this, _, event, cx| {
+            this.on_images_event(event, cx);
         })
         .detach();
 
@@ -76,75 +76,87 @@ impl Viewer {
             images,
             image: None,
             error: None,
+            visible: false,
             transform: ViewTransform::default(),
+            placed: None,
             viewport: None,
             drag_position: None,
             folder: None,
             folder_task: None,
         };
-        this.load(path, Direction::Next, window, cx);
+        this.load(path, Direction::Next, cx);
         this
     }
 
     /// Shows `path`, reached by moving in `direction`. Unless it is decoded
     /// already, the current image stays visible until it is.
-    pub fn load(
-        &mut self,
-        path: PathBuf,
-        direction: Direction,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn load(&mut self, path: PathBuf, direction: Direction, cx: &mut Context<Self>) {
         self.key = ImageKey::new(path);
         self.direction = direction;
         self.list_folder(cx);
+        if self.visible {
+            self.show_decoded(cx);
+            self.request(cx);
+        }
+    }
+
+    /// Shows or hides the tab. A hidden viewer lets go of its image, and
+    /// decodes it again when shown unless it is still in memory.
+    pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.visible == visible {
+            return;
+        }
+        self.visible = visible;
+        if visible {
+            self.show_decoded(cx);
+        } else {
+            self.image = None;
+        }
+        self.request(cx);
+        cx.notify();
+    }
+
+    /// Shows the current image or why it cannot be shown, if it is known
+    /// already.
+    fn show_decoded(&mut self, cx: &mut Context<Self>) {
         let key = self.key.clone();
         let (image, error) = self
             .images
             .update(cx, |images, _| (images.get(&key), images.error(&key)));
         if let Some(image) = image {
-            self.show(image, window, cx);
+            self.show(image, cx);
         } else if let Some(error) = error {
-            self.show_error(error, window, cx);
+            self.show_error(error, cx);
         }
-        self.request(cx);
     }
 
-    /// Asks for the current image and the images around it in the folder.
+    /// Asks for the current image and the images around it in the folder, or
+    /// for nothing while the tab is hidden.
     fn request(&self, cx: &mut Context<Self>) {
-        let prefetch = self.folder_images().map_or_default(|images| {
-            prefetch_images(images, &self.key.path, self.direction, PREFETCH_COUNT)
-                .into_iter()
-                .map(|path| ImageKey::new(path.to_path_buf()))
-                .collect()
-        });
+        let request = if self.visible {
+            Request {
+                shown: self.image.as_ref().map(|(key, _)| key.clone()),
+                current: Some(self.key.clone()),
+                prefetch: self.folder_images().map_or_default(|images| {
+                    prefetch_images(images, &self.key.path, self.direction, PREFETCH_COUNT)
+                        .into_iter()
+                        .map(|path| ImageKey::new(path.to_path_buf()))
+                        .collect()
+                }),
+            }
+        } else {
+            Request::default()
+        };
         let id = cx.entity_id();
-        let current = self.key.clone();
-        self.images.update(cx, |images, cx| {
-            images.request(id, Some(current), prefetch, cx);
-        });
+        self.images
+            .update(cx, |images, cx| images.request(id, request, cx));
     }
 
-    fn on_images_event(
-        &mut self,
-        event: &ImagesEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match event {
-            ImagesEvent::Loaded(key) if *key == self.key => {
-                let image = self.images.update(cx, |images, _| images.get(key));
-                if let Some(image) = image {
-                    self.show(image, window, cx);
-                }
-            }
-            ImagesEvent::Failed(key) if *key == self.key => {
-                let error = self.images.read(cx).error(key);
-                if let Some(error) = error {
-                    self.show_error(error, window, cx);
-                }
-            }
-            ImagesEvent::Loaded(_) | ImagesEvent::Failed(_) => {}
+    fn on_images_event(&mut self, event: &ImagesEvent, cx: &mut Context<Self>) {
+        let (ImagesEvent::Loaded(key) | ImagesEvent::Failed(key)) = event;
+        if self.visible && *key == self.key {
+            self.show_decoded(cx);
+            self.request(cx);
         }
     }
 
@@ -201,29 +213,22 @@ impl Viewer {
             .map(|folder| folder.images.as_slice())
     }
 
-    fn show(&mut self, image: Arc<RenderImage>, window: &mut Window, cx: &mut Context<Self>) {
-        self.release_image(window, cx);
+    fn show(&mut self, image: Arc<RenderImage>, cx: &mut Context<Self>) {
+        if self.placed.as_ref() != Some(&self.key) {
+            self.transform.reset();
+            self.placed = Some(self.key.clone());
+        }
         self.image = Some((self.key.clone(), image));
         self.error = None;
-        self.transform.reset();
         cx.notify();
     }
 
-    fn show_error(&mut self, error: SharedString, window: &mut Window, cx: &mut Context<Self>) {
-        self.release_image(window, cx);
+    fn show_error(&mut self, error: SharedString, cx: &mut Context<Self>) {
+        self.image = None;
         self.error = Some(error);
         self.transform.reset();
+        self.placed = None;
         cx.notify();
-    }
-
-    /// Stops showing the image. Its texture is freed unless the image is still
-    /// kept in memory to be shown again.
-    fn release_image(&mut self, window: &mut Window, cx: &mut App) {
-        if let Some((key, image)) = self.image.take()
-            && !self.images.read(cx).contains(&key)
-        {
-            cx.drop_image(image, Some(window));
-        }
     }
 
     pub fn reset_view(&mut self, cx: &mut Context<Self>) {

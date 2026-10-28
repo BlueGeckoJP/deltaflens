@@ -35,12 +35,34 @@ struct Args {
     open: Option<PathBuf>,
 }
 
+/// Allocations at least this large get their own memory mapping.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const MMAP_THRESHOLD: libc::c_int = 1024 * 1024;
+
+/// Makes the memory of large allocations, such as decoded images, go back to
+/// the system when they are freed.
+///
+/// By default glibc raises this threshold up to 32 MB as large allocations
+/// are freed, and keeps the freed memory of smaller ones for later. The
+/// buffers made while decoding images are just below that, so the memory used
+/// grew to about twice the limit of the image cache.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn return_large_allocations_to_the_system() {
+    // SAFETY: `mallopt` only changes a setting of the allocator, which takes
+    // effect for later allocations.
+    if unsafe { libc::mallopt(libc::M_MMAP_THRESHOLD, MMAP_THRESHOLD) } == 0 {
+        tracing::warn!("failed to set the mmap threshold of the allocator");
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     color_eyre::install()?;
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    return_large_allocations_to_the_system();
 
     gpui_platform::application().run(move |cx: &mut App| {
         cx.on_action(|_: &Quit, cx| cx.quit());
