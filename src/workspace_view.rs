@@ -10,7 +10,7 @@ use eyre::{Result, eyre};
 use gpui::{
     AnyElement, ClickEvent, Context, CursorStyle, DragMoveEvent, ElementId, Entity, FocusHandle,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point,
-    Window, actions, anchored, deferred, div, prelude::*, px, relative, rgb,
+    SharedString, Window, actions, anchored, deferred, div, prelude::*, px, relative, rgb,
 };
 
 use crate::{
@@ -77,14 +77,45 @@ struct DraggedDivider {
     boundary: usize,
 }
 
-/// What follows the mouse while dragging. Nothing is drawn for a line between
-/// panes.
-struct DragPreview;
+/// A tab being dragged.
+struct DraggedTab {
+    pane_id: PaneId,
+    tab_id: TabId,
+    label: SharedString,
+}
+
+/// The background of the tab, or of the empty part of a tab bar, that a
+/// dragged tab is dropped before (or at the end of).
+const DROP_TARGET_COLOR: u32 = 0x2a_3a_4a;
+
+/// What follows the mouse while dragging: the name of a tab, or nothing for a
+/// line between panes.
+struct DragPreview {
+    label: Option<SharedString>,
+}
 
 impl Render for DragPreview {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
+        div().when_some(self.label.clone(), |this, label| {
+            this.px_3()
+                .py_1()
+                .rounded_sm()
+                .bg(rgb(0x2a_2a_2a))
+                .text_sm()
+                .text_color(rgb(0xe0_e0_e0))
+                .child(label)
+        })
     }
+}
+
+/// How a tab looks.
+#[derive(Clone, Copy)]
+struct TabLook {
+    active: bool,
+    /// The active tab of the focused pane, marked when there are other panes.
+    marked: bool,
+    /// The tab is at the top left corner of a window with rounded corners.
+    round_top_left: bool,
 }
 
 /// The menu opened by right-clicking a tab.
@@ -436,6 +467,28 @@ impl WorkspaceView {
         }
     }
 
+    /// Moves a dragged tab to `index` in `pane_id`. Only moves within the same
+    /// pane.
+    fn move_tab(
+        &mut self,
+        dragged: &DraggedTab,
+        pane_id: PaneId,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if dragged.pane_id != pane_id {
+            return;
+        }
+        let result = self
+            .workspace
+            .pane_mut(pane_id)
+            .and_then(|pane| pane.move_tab(dragged.tab_id, index));
+        if let Err(error) = result {
+            tracing::error!("{error:#}");
+        }
+        cx.notify();
+    }
+
     /// Splits the focused pane, copying its active tab into the new pane.
     fn split(&mut self, axis: Axis, window: &mut Window, cx: &mut Context<Self>) {
         self.tab_menu = None;
@@ -769,7 +822,9 @@ impl WorkspaceView {
             // window under it.
             .occlude()
             .hover(|style| style.bg(rgb(FOCUS_COLOR)))
-            .on_drag(dragged, |_, _, _, cx| cx.new(|_| DragPreview))
+            .on_drag(dragged, |_, _, _, cx| {
+                cx.new(|_| DragPreview { label: None })
+            })
             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                 if event.click_count() == 2 {
                     if let Err(error) = this.workspace.equalize(&equalize_path) {
@@ -865,6 +920,7 @@ impl WorkspaceView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let tab_count = tabs.len();
         let round_top_left = title_bar.is_some_and(|part| part.round_top_left);
         let round_top_right = title_bar.is_some_and(|part| part.round_top_right);
         let tabs = div()
@@ -874,71 +930,12 @@ impl WorkspaceView {
             .h_full()
             .overflow_x_scroll()
             .children(tabs.iter().enumerate().map(|(index, tab)| {
-                let tab_id = tab.id();
-                let is_active = active == Some(tab_id);
-                div()
-                    .id(("tab", index))
-                    .when(index == 0 && round_top_left, |this| {
-                        this.rounded_tl(ROUNDING)
-                    })
-                    .flex()
-                    .flex_shrink_0()
-                    .items_center()
-                    .gap_1()
-                    .max_w(px(240.))
-                    .h_full()
-                    .pl_3()
-                    .pr_1()
-                    .border_r_1()
-                    .border_color(rgb(0x2a_2a_2a))
-                    .bg(rgb(if is_active { 0x1e_1e_1e } else { 0x14_14_14 }))
-                    .text_color(rgb(if is_active { 0xe0_e0_e0 } else { 0x90_90_90 }))
-                    .relative()
-                    .when(marked == Some(tab_id), |this| {
-                        this.child(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .left_0()
-                                .w_full()
-                                .h(px(2.))
-                                .bg(rgb(FOCUS_COLOR)),
-                        )
-                    })
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.activate_tab(pane_id, tab_id, cx);
-                    }))
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                            this.tab_menu = Some(TabMenu {
-                                pane_id,
-                                tab_id,
-                                position: event.position,
-                            });
-                            cx.notify();
-                        }),
-                    )
-                    .on_mouse_up(
-                        MouseButton::Middle,
-                        cx.listener(move |this, _: &MouseUpEvent, _, cx| {
-                            this.close_tab(pane_id, tab_id, cx);
-                        }),
-                    )
-                    .child(div().min_w_0().truncate().child(tab_name(tab)))
-                    .child(
-                        div()
-                            .id("close")
-                            .flex_shrink_0()
-                            .px_1()
-                            .rounded_sm()
-                            .hover(|style| style.bg(rgb(0x3a_3a_3a)))
-                            .child("×")
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                cx.stop_propagation();
-                                this.close_tab(pane_id, tab_id, cx);
-                            })),
-                    )
+                let look = TabLook {
+                    active: active == Some(tab.id()),
+                    marked: marked == Some(tab.id()),
+                    round_top_left: index == 0 && round_top_left,
+                };
+                Self::render_tab(pane_id, index, tab, look, cx)
             }));
         div()
             .flex()
@@ -950,24 +947,135 @@ impl WorkspaceView {
             .when(round_top_left, |this| this.rounded_tl(ROUNDING))
             .when(round_top_right, |this| this.rounded_tr(ROUNDING))
             .child(tabs)
-            .when_some(title_bar, |this, part| {
-                this.child(Self::render_drag_area(pane_id, window, cx))
-                    .when(part.controls, |this| {
-                        this.child(window_frame::window_controls(window, round_top_right))
-                    })
+            .child(Self::render_rest_of_tab_bar(
+                pane_id,
+                tab_count,
+                title_bar.is_some(),
+                window,
+                cx,
+            ))
+            .when(title_bar.is_some_and(|part| part.controls), |this| {
+                this.child(window_frame::window_controls(window, round_top_right))
             })
     }
 
-    /// The empty part of a tab bar at the top of the window, which works as a
-    /// title bar.
-    fn render_drag_area(pane_id: PaneId, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let controls = window.window_controls();
+    fn render_tab(
+        pane_id: PaneId,
+        index: usize,
+        tab: &Tab,
+        look: TabLook,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let tab_id = tab.id();
+        let label = SharedString::from(tab_name(tab));
         div()
-            .id(ElementId::Name(format!("drag-area-{pane_id:?}").into()))
-            .flex_1()
+            .id(("tab", index))
+            .when(look.round_top_left, |this| this.rounded_tl(ROUNDING))
+            .flex()
             .flex_shrink_0()
-            .min_w(MIN_DRAG_WIDTH)
+            .items_center()
+            .gap_1()
+            .max_w(px(240.))
             .h_full()
+            .pl_3()
+            .pr_1()
+            .border_r_1()
+            .border_color(rgb(0x2a_2a_2a))
+            .bg(rgb(if look.active { 0x1e_1e_1e } else { 0x14_14_14 }))
+            .text_color(rgb(if look.active { 0xe0_e0_e0 } else { 0x90_90_90 }))
+            .relative()
+            .when(look.marked, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .w_full()
+                        .h(px(2.))
+                        .bg(rgb(FOCUS_COLOR)),
+                )
+            })
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.activate_tab(pane_id, tab_id, cx);
+            }))
+            // Dragging a tab moves it; dropping it on another tab of the same
+            // pane puts it where that tab is.
+            .on_drag(
+                DraggedTab {
+                    pane_id,
+                    tab_id,
+                    label: label.clone(),
+                },
+                |dragged, _, _, cx| {
+                    cx.new(|_| DragPreview {
+                        label: Some(dragged.label.clone()),
+                    })
+                },
+            )
+            .can_drop(move |dragged, _, _| is_tab_of(dragged, pane_id))
+            .drag_over::<DraggedTab>(|style, _, _, _| style.bg(rgb(DROP_TARGET_COLOR)))
+            .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
+                this.move_tab(dragged, pane_id, index, cx);
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.tab_menu = Some(TabMenu {
+                        pane_id,
+                        tab_id,
+                        position: event.position,
+                    });
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(move |this, _: &MouseUpEvent, _, cx| {
+                    this.close_tab(pane_id, tab_id, cx);
+                }),
+            )
+            .child(div().min_w_0().truncate().child(label))
+            .child(
+                div()
+                    .id("close")
+                    .flex_shrink_0()
+                    .px_1()
+                    .rounded_sm()
+                    .hover(|style| style.bg(rgb(0x3a_3a_3a)))
+                    .child("×")
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.close_tab(pane_id, tab_id, cx);
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// The part of a tab bar right of the tabs. A tab dropped on it moves to
+    /// the end. At the top of the window, it works as a title bar when
+    /// `moves_window` is set.
+    fn render_rest_of_tab_bar(
+        pane_id: PaneId,
+        tab_count: usize,
+        moves_window: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let controls = window.window_controls();
+        let rest = div()
+            .id(ElementId::Name(format!("tab-bar-rest-{pane_id:?}").into()))
+            .flex_1()
+            .h_full()
+            .can_drop(move |dragged, _, _| is_tab_of(dragged, pane_id))
+            .drag_over::<DraggedTab>(|style, _, _, _| style.bg(rgb(DROP_TARGET_COLOR)))
+            .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
+                this.move_tab(dragged, pane_id, tab_count, cx);
+            }));
+        if !moves_window {
+            return rest.into_any_element();
+        }
+        rest.flex_shrink_0()
+            .min_w(MIN_DRAG_WIDTH)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, _, _| this.move_pending = true),
@@ -999,6 +1107,13 @@ impl WorkspaceView {
             })
             .into_any_element()
     }
+}
+
+/// Whether `dragged` is a tab of the pane.
+fn is_tab_of(dragged: &dyn std::any::Any, pane_id: PaneId) -> bool {
+    dragged
+        .downcast_ref::<DraggedTab>()
+        .is_some_and(|tab| tab.pane_id == pane_id)
 }
 
 /// The label of a tab: the file or folder name of what it shows.

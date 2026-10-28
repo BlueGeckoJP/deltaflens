@@ -38,6 +38,22 @@ impl Pane {
         self.take_tab(id).map(|_| ())
     }
 
+    /// Moves the tab so that it ends up at `index` (or last, if `index` is past
+    /// the end). The active tab stays the same tab.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pane has no tab with `id`.
+    pub fn move_tab(&mut self, id: TabId, index: usize) -> Result<()> {
+        let from = self.index_of(id)?;
+        let active = self.active.map(|active| self.tabs[active].id());
+        let tab = self.tabs.remove(from);
+        let to = index.min(self.tabs.len());
+        self.tabs.insert(to, tab);
+        self.active = active.and_then(|active| self.tabs.iter().position(|tab| tab.id() == active));
+        Ok(())
+    }
+
     /// Adds `tabs` after the last tab. The active tab stays; if there was none,
     /// the first added tab becomes active.
     pub(crate) fn append_tabs(&mut self, tabs: Vec<Tab>) {
@@ -199,6 +215,50 @@ mod tests {
         pane.close_tab(TabId(0)).unwrap();
         assert_eq!(pane.tabs(), []);
         assert_eq!(active_id(&pane), None);
+    }
+
+    #[test]
+    fn move_tab_to_the_start() {
+        let mut pane = pane_with_tabs(3);
+        pane.move_tab(TabId(2), 0).unwrap();
+        assert_eq!(tab_ids(&pane), vec![2, 0, 1]);
+        assert_eq!(active_id(&pane), Some(2));
+    }
+
+    #[test]
+    fn move_tab_to_the_end() {
+        let mut pane = pane_with_tabs(3);
+        pane.move_tab(TabId(0), 2).unwrap();
+        assert_eq!(tab_ids(&pane), vec![1, 2, 0]);
+        pane.move_tab(TabId(1), 99).unwrap();
+        assert_eq!(tab_ids(&pane), vec![2, 0, 1]);
+    }
+
+    #[test]
+    fn move_tab_keeps_the_active_tab() {
+        let mut pane = pane_with_tabs(3);
+        pane.activate_tab(TabId(1)).unwrap();
+        pane.move_tab(TabId(0), 2).unwrap();
+        assert_eq!(tab_ids(&pane), vec![1, 2, 0]);
+        assert_eq!(active_id(&pane), Some(1));
+        pane.move_tab(TabId(1), 1).unwrap();
+        assert_eq!(tab_ids(&pane), vec![2, 1, 0]);
+        assert_eq!(active_id(&pane), Some(1));
+    }
+
+    #[test]
+    fn move_tab_to_the_same_place_changes_nothing() {
+        let mut pane = pane_with_tabs(3);
+        pane.move_tab(TabId(1), 1).unwrap();
+        assert_eq!(tab_ids(&pane), vec![0, 1, 2]);
+        assert_eq!(active_id(&pane), Some(2));
+    }
+
+    #[test]
+    fn move_missing_tab_fails_without_change() {
+        let mut pane = pane_with_tabs(2);
+        assert!(pane.move_tab(TabId(9), 0).is_err());
+        assert_eq!(tab_ids(&pane), vec![0, 1]);
     }
 
     #[test]
