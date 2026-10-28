@@ -3,16 +3,20 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use deltaflens_core::{Axis, Direction, Layout, PaneId, Tab, TabContent, TabId, Workspace};
+use deltaflens_core::{
+    Axis, Direction, DropZone, Layout, PaneId, Preset, Side, Tab, TabContent, TabId, Workspace,
+    drop_zone,
+};
 use eyre::{Result, eyre};
 use gpui::{
-    AnyElement, ClickEvent, Context, ElementId, Entity, FocusHandle, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Window, actions, div, prelude::*, px,
-    relative, rgb,
+    AnyElement, Bounds, ClickEvent, Context, CursorStyle, DragMoveEvent, ElementId, Entity,
+    FocusHandle, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions,
+    Pixels, Point, SharedString, Window, actions, anchored, deferred, div, prelude::*, px,
+    relative, rgb, rgba,
 };
 
 use crate::{
-    explorer::{Explorer, ExplorerEvent},
+    explorer::{DraggedImage, Explorer, ExplorerEvent},
     thumbnails::Thumbnails,
     viewer::Viewer,
     window_frame::{self, ROUNDING},
@@ -32,6 +36,22 @@ actions!(
         GoBack,
         GoForward,
         GoUp,
+        SplitRight,
+        SplitDown,
+        FocusPaneLeft,
+        FocusPaneRight,
+        FocusPaneUp,
+        FocusPaneDown,
+        SwapPaneLeft,
+        SwapPaneRight,
+        SwapPaneUp,
+        SwapPaneDown,
+        LayoutSingle,
+        LayoutTwoColumns,
+        LayoutThreeColumns,
+        LayoutGrid,
+        LayoutExplorerAndViewer,
+        ReopenClosedTab,
     ]
 );
 
@@ -42,6 +62,72 @@ const TAB_BAR_HEIGHT: Pixels = px(36.);
 /// The width of the empty part of a tab bar kept for moving the window, even
 /// when the tabs fill the bar.
 const MIN_DRAG_WIDTH: Pixels = px(48.);
+
+/// The color that marks the focused pane, on its active tab.
+const FOCUS_COLOR: u32 = 0x5b_9b_e0;
+/// The color of the lines between panes.
+const DIVIDER_COLOR: u32 = 0x2a_2a_2a;
+/// The width of the area around a line between panes that can be dragged.
+const DIVIDER_HANDLE_WIDTH: Pixels = px(6.);
+/// The smallest width and height of a pane when dragging a line between panes.
+const MIN_PANE_SIZE: f32 = 120.;
+
+/// A line between two children of a split, being dragged.
+struct DraggedDivider {
+    /// The indices of the children from the root to the split.
+    path: Vec<usize>,
+    /// The line is after this child.
+    boundary: usize,
+}
+
+/// A tab being dragged.
+struct DraggedTab {
+    tab_id: TabId,
+    label: SharedString,
+}
+
+/// The background of the tab, or of the empty part of a tab bar, that a
+/// dragged tab is dropped before (or at the end of).
+const DROP_TARGET_COLOR: u32 = 0x2a_3a_4a;
+/// The part of a pane that a dragged tab or image would take, shown over it.
+const DROP_ZONE_COLOR: u32 = 0x5b_9b_e0_40;
+
+/// What follows the mouse while dragging: the name of a tab, or nothing for a
+/// line between panes.
+struct DragPreview {
+    label: Option<SharedString>,
+}
+
+impl Render for DragPreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().when_some(self.label.clone(), |this, label| {
+            this.px_3()
+                .py_1()
+                .rounded_sm()
+                .bg(rgb(0x2a_2a_2a))
+                .text_sm()
+                .text_color(rgb(0xe0_e0_e0))
+                .child(label)
+        })
+    }
+}
+
+/// How a tab looks.
+#[derive(Clone, Copy)]
+struct TabLook {
+    active: bool,
+    /// The active tab of the focused pane, marked when there are other panes.
+    marked: bool,
+    /// The tab is at the top left corner of a window with rounded corners.
+    round_top_left: bool,
+}
+
+/// The menu opened by right-clicking a tab.
+struct TabMenu {
+    pane_id: PaneId,
+    tab_id: TabId,
+    position: Point<Pixels>,
+}
 
 /// What the tab bar of a pane at the top edge of the window does as part of
 /// the title bar, when the app draws the window frame. Its empty part moves
@@ -83,6 +169,9 @@ pub struct WorkspaceView {
     /// moving when the mouse moves, so that a double click still reaches the
     /// tab bar.
     move_pending: bool,
+    tab_menu: Option<TabMenu>,
+    /// Where a tab or image dragged over a pane would go.
+    drop_target: Option<(PaneId, DropZone)>,
 }
 
 impl WorkspaceView {
@@ -96,6 +185,8 @@ impl WorkspaceView {
             focus_handle,
             title: APP_NAME.to_owned(),
             move_pending: false,
+            tab_menu: None,
+            drop_target: None,
         }
     }
 
@@ -115,14 +206,40 @@ impl WorkspaceView {
     /// Opens a new tab in the focused pane, to the right of its active tab.
     fn open_tab(&mut self, content: TabContent, window: &mut Window, cx: &mut Context<Self>) {
         let pane_id = self.workspace.focused_pane();
-        let tab_id = match self.workspace.open_tab(pane_id, content.clone()) {
-            Ok(tab_id) => tab_id,
-            Err(error) => {
-                tracing::error!("{error:#}");
-                return;
+        if let Err(error) = self.workspace.open_tab(pane_id, content) {
+            tracing::error!("{error:#}");
+        }
+        self.sync_views(window, cx);
+    }
+
+    /// Creates the views of tabs that have none, and releases the views of
+    /// closed tabs, with their decoded images.
+    fn sync_views(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut open = Vec::new();
+        for pane_id in self.workspace.layout().pane_ids() {
+            let Ok(pane) = self.workspace.pane(pane_id) else {
+                continue;
+            };
+            for tab in pane.tabs() {
+                open.push(tab.id());
+                if !self.views.contains_key(&tab.id()) {
+                    let view = self.create_view(tab.id(), tab.content().clone(), window, cx);
+                    self.views.insert(tab.id(), view);
+                }
             }
-        };
-        let view = match content {
+        }
+        self.views.retain(|tab_id, _| open.contains(tab_id));
+        cx.notify();
+    }
+
+    fn create_view(
+        &self,
+        tab_id: TabId,
+        content: TabContent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> TabView {
+        match content {
             TabContent::Viewer { path } => {
                 TabView::Viewer(cx.new(|cx| Viewer::new(path, window, cx)))
             }
@@ -135,9 +252,7 @@ impl WorkspaceView {
                 .detach();
                 TabView::Explorer(explorer)
             }
-        };
-        self.views.insert(tab_id, view);
-        cx.notify();
+        }
     }
 
     fn on_explorer_event(
@@ -347,18 +462,313 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// Closes the tab and releases its view, with a decoded image if any.
+    /// Closes the tab, and its pane if it was the last tab there, then releases
+    /// its view with a decoded image if any.
     fn close_tab(&mut self, pane_id: PaneId, tab_id: TabId, cx: &mut Context<Self>) {
-        let result = self
-            .workspace
-            .pane_mut(pane_id)
-            .and_then(|pane| pane.close_tab(tab_id));
-        match result {
+        match self.workspace.close_tab(pane_id, tab_id) {
             Ok(()) => {
                 self.views.remove(&tab_id);
                 cx.notify();
             }
             Err(error) => tracing::error!("{error:#}"),
+        }
+    }
+
+    /// Moves a dragged tab to `index` in `pane_id`, from any pane.
+    fn move_tab(
+        &mut self,
+        dragged: &DraggedTab,
+        pane_id: PaneId,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(error) = self
+            .workspace
+            .move_tab(dragged.tab_id, pane_id, Some(index))
+        {
+            tracing::error!("{error:#}");
+        }
+        cx.notify();
+    }
+
+    /// Opens a dragged image in a new tab at `index` in `pane_id`.
+    fn open_image_at(
+        &mut self,
+        dragged: &DraggedImage,
+        pane_id: PaneId,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let content = TabContent::Viewer {
+            path: dragged.path.clone(),
+        };
+        let result = self
+            .workspace
+            .open_tab(pane_id, content)
+            .and_then(|tab_id| {
+                self.workspace.focus_pane(pane_id)?;
+                self.workspace.move_tab(tab_id, pane_id, Some(index))
+            });
+        if let Err(error) = result {
+            tracing::error!("{error:#}");
+        }
+        self.sync_views(window, cx);
+    }
+
+    /// Remembers where a tab or image dragged over `pane_id` would go, from the
+    /// mouse at `position` and the pane's content at `bounds`.
+    fn update_drop_target(
+        &mut self,
+        pane_id: PaneId,
+        bounds: Bounds<Pixels>,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let target = if bounds.contains(&position) {
+            let offset = position - bounds.origin;
+            let zone = drop_zone(
+                f32::from(bounds.size.width),
+                f32::from(bounds.size.height),
+                f32::from(offset.x),
+                f32::from(offset.y),
+            );
+            Some((pane_id, zone))
+        } else if self.drop_target.is_some_and(|(id, _)| id == pane_id) {
+            None
+        } else {
+            return;
+        };
+        if self.drop_target != target {
+            self.drop_target = target;
+            cx.notify();
+        }
+    }
+
+    /// Where a drop on `pane_id` goes, as last shown.
+    fn take_drop_zone(&mut self, pane_id: PaneId) -> DropZone {
+        match self.drop_target.take() {
+            Some((id, zone)) if id == pane_id => zone,
+            _ => DropZone::Center,
+        }
+    }
+
+    /// Moves a tab dropped on the content of `pane_id` into it, or into a new
+    /// pane split off on the edge it was dropped on.
+    fn drop_tab_on_pane(&mut self, dragged: &DraggedTab, pane_id: PaneId, cx: &mut Context<Self>) {
+        let result = match self.take_drop_zone(pane_id) {
+            DropZone::Center => self.workspace.move_tab(dragged.tab_id, pane_id, None),
+            DropZone::Edge(side) => self
+                .workspace
+                .move_tab_to_split(dragged.tab_id, pane_id, side)
+                .map(|_| ()),
+        };
+        if let Err(error) = result {
+            tracing::error!("{error:#}");
+        }
+        cx.notify();
+    }
+
+    /// Opens an image dropped on the content of `pane_id` in a new tab there,
+    /// or in a new pane split off on the edge it was dropped on.
+    fn drop_image_on_pane(
+        &mut self,
+        dragged: &DraggedImage,
+        pane_id: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let content = TabContent::Viewer {
+            path: dragged.path.clone(),
+        };
+        let result = match self.take_drop_zone(pane_id) {
+            DropZone::Center => self
+                .workspace
+                .focus_pane(pane_id)
+                .and_then(|()| self.workspace.open_tab(pane_id, content)),
+            DropZone::Edge(side) => self.workspace.open_tab_in_split(pane_id, side, content),
+        };
+        if let Err(error) = result {
+            tracing::error!("{error:#}");
+        }
+        self.sync_views(window, cx);
+    }
+
+    /// Splits the focused pane, copying its active tab into the new pane.
+    fn split(&mut self, axis: Axis, window: &mut Window, cx: &mut Context<Self>) {
+        self.tab_menu = None;
+        if let Err(error) = self
+            .workspace
+            .split_pane(self.workspace.focused_pane(), axis)
+        {
+            tracing::error!("{error:#}");
+        }
+        self.sync_views(window, cx);
+    }
+
+    fn split_right(&mut self, _: &SplitRight, window: &mut Window, cx: &mut Context<Self>) {
+        self.split(Axis::Horizontal, window, cx);
+    }
+
+    fn split_down(&mut self, _: &SplitDown, window: &mut Window, cx: &mut Context<Self>) {
+        self.split(Axis::Vertical, window, cx);
+    }
+
+    fn focus_neighbor(&mut self, side: Side, cx: &mut Context<Self>) {
+        if self.workspace.focus_neighbor(side) {
+            cx.notify();
+        }
+    }
+
+    fn focus_pane_left(&mut self, _: &FocusPaneLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.focus_neighbor(Side::Left, cx);
+    }
+
+    fn focus_pane_right(&mut self, _: &FocusPaneRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.focus_neighbor(Side::Right, cx);
+    }
+
+    fn focus_pane_up(&mut self, _: &FocusPaneUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.focus_neighbor(Side::Up, cx);
+    }
+
+    fn focus_pane_down(&mut self, _: &FocusPaneDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.focus_neighbor(Side::Down, cx);
+    }
+
+    fn swap_with_neighbor(&mut self, side: Side, cx: &mut Context<Self>) {
+        if self.workspace.swap_with_neighbor(side) {
+            cx.notify();
+        }
+    }
+
+    fn swap_pane_left(&mut self, _: &SwapPaneLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.swap_with_neighbor(Side::Left, cx);
+    }
+
+    fn swap_pane_right(&mut self, _: &SwapPaneRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.swap_with_neighbor(Side::Right, cx);
+    }
+
+    fn swap_pane_up(&mut self, _: &SwapPaneUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.swap_with_neighbor(Side::Up, cx);
+    }
+
+    fn swap_pane_down(&mut self, _: &SwapPaneDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.swap_with_neighbor(Side::Down, cx);
+    }
+
+    fn apply_preset(&mut self, preset: Preset, window: &mut Window, cx: &mut Context<Self>) {
+        self.workspace.apply_preset(preset);
+        self.sync_views(window, cx);
+    }
+
+    fn layout_single(&mut self, _: &LayoutSingle, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_preset(Preset::Single, window, cx);
+    }
+
+    fn layout_two_columns(
+        &mut self,
+        _: &LayoutTwoColumns,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_preset(Preset::TwoColumns, window, cx);
+    }
+
+    fn layout_three_columns(
+        &mut self,
+        _: &LayoutThreeColumns,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_preset(Preset::ThreeColumns, window, cx);
+    }
+
+    fn layout_grid(&mut self, _: &LayoutGrid, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_preset(Preset::Grid, window, cx);
+    }
+
+    fn layout_explorer_and_viewer(
+        &mut self,
+        _: &LayoutExplorerAndViewer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_preset(Preset::ExplorerAndViewer, window, cx);
+    }
+
+    fn focus_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
+        if self.workspace.focused_pane() != pane_id {
+            if let Err(error) = self.workspace.focus_pane(pane_id) {
+                tracing::error!("{error:#}");
+            }
+            cx.notify();
+        }
+    }
+
+    fn render_tab_menu(menu: &TabMenu, cx: &mut Context<Self>) -> impl IntoElement {
+        let item = |id: &'static str, label: &'static str| {
+            div()
+                .id(id)
+                .px_3()
+                .py_1()
+                .rounded_sm()
+                .hover(|style| style.bg(rgb(0x3a_3a_3a)))
+                .child(label)
+        };
+        let (pane_id, tab_id) = (menu.pane_id, menu.tab_id);
+        // The split copies the tab the menu was opened on.
+        let split_right = cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.activate_tab(pane_id, tab_id, cx);
+            this.split(Axis::Horizontal, window, cx);
+        });
+        let split_down = cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.activate_tab(pane_id, tab_id, cx);
+            this.split(Axis::Vertical, window, cx);
+        });
+        div()
+            .flex()
+            .flex_col()
+            .min_w(px(160.))
+            .p_1()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(0x3a_3a_3a))
+            .bg(rgb(0x24_24_24))
+            .text_sm()
+            .text_color(rgb(0xd0_d0_d0))
+            .shadow_md()
+            // Keep clicks on the menu from reaching the tabs under it.
+            .occlude()
+            .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                this.tab_menu = None;
+                cx.notify();
+            }))
+            .child(item("split-right", "Split right").on_click(split_right))
+            .child(item("split-down", "Split down").on_click(split_down))
+            .child(item("close-tab", "Close tab").on_click(cx.listener(
+                move |this, _: &ClickEvent, _, cx| {
+                    this.tab_menu = None;
+                    this.close_tab(pane_id, tab_id, cx);
+                },
+            )))
+    }
+
+    /// Reopens the most recently closed tab, skipping those whose file or
+    /// folder is gone.
+    fn reopen_closed_tab(
+        &mut self,
+        _: &ReopenClosedTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let exists = |content: &TabContent| match content {
+            TabContent::Viewer { path } => path.is_file(),
+            TabContent::Explorer { dir } => dir.is_dir(),
+        };
+        if self.workspace.reopen_closed_tab(exists).is_some() {
+            self.sync_views(window, cx);
         }
     }
 
@@ -421,9 +831,11 @@ impl WorkspaceView {
             .collect()
     }
 
+    /// `path` is the indices of the children from the root to `layout`.
     fn render_layout(
         &self,
         layout: &Layout,
+        path: &[usize],
         title_bar: &HashMap<PaneId, TitleBarPart>,
         window: &Window,
         cx: &mut Context<Self>,
@@ -433,21 +845,135 @@ impl WorkspaceView {
                 let part = title_bar.get(pane_id).copied();
                 self.render_pane(*pane_id, part, window, cx)
             }
-            Layout::Split { axis, children } => div()
-                .size_full()
-                .flex()
-                .when(*axis == Axis::Vertical, Styled::flex_col)
-                .children(children.iter().map(|(child, ratio)| {
-                    let cell = div()
-                        .overflow_hidden()
-                        .child(self.render_layout(child, title_bar, window, cx));
-                    match axis {
-                        Axis::Horizontal => cell.h_full().w(relative(*ratio)),
-                        Axis::Vertical => cell.w_full().h(relative(*ratio)),
-                    }
-                }))
-                .into_any_element(),
+            Layout::Split { axis, children } => {
+                let axis = *axis;
+                // A line after every child but the last.
+                let mut offset = 0.;
+                let mut dividers = Vec::new();
+                for (boundary, (_, ratio)) in children
+                    .iter()
+                    .enumerate()
+                    .take(children.len().saturating_sub(1))
+                {
+                    offset += ratio;
+                    dividers.push(Self::render_divider(path, boundary, axis, offset, cx));
+                }
+                let split_path = path.to_vec();
+                div()
+                    .id(ElementId::Name(format!("split-{path:?}").into()))
+                    .size_full()
+                    .relative()
+                    .flex()
+                    .when(axis == Axis::Vertical, Styled::flex_col)
+                    .on_drag_move(cx.listener(
+                        move |this, event: &DragMoveEvent<DraggedDivider>, _, cx| {
+                            let Some(divider) =
+                                event.dragged_item().downcast_ref::<DraggedDivider>()
+                            else {
+                                return;
+                            };
+                            if divider.path != split_path {
+                                return;
+                            }
+                            let position = event.event.position - event.bounds.origin;
+                            let (offset, extent) = match axis {
+                                Axis::Horizontal => (position.x, event.bounds.size.width),
+                                Axis::Vertical => (position.y, event.bounds.size.height),
+                            };
+                            let result = this.workspace.move_boundary(
+                                &split_path,
+                                divider.boundary,
+                                f32::from(offset),
+                                f32::from(extent),
+                                MIN_PANE_SIZE,
+                            );
+                            if let Err(error) = result {
+                                tracing::error!("{error:#}");
+                            }
+                            cx.notify();
+                        },
+                    ))
+                    .children(children.iter().enumerate().map(|(index, (child, ratio))| {
+                        let mut child_path = path.to_vec();
+                        child_path.push(index);
+                        let cell = div()
+                            .overflow_hidden()
+                            .border_color(rgb(DIVIDER_COLOR))
+                            .child(self.render_layout(child, &child_path, title_bar, window, cx));
+                        // A line on the leading side of every child but the first.
+                        let has_divider = index > 0;
+                        match axis {
+                            Axis::Horizontal => cell
+                                .h_full()
+                                .w(relative(*ratio))
+                                .when(has_divider, Styled::border_l_1),
+                            Axis::Vertical => cell
+                                .w_full()
+                                .h(relative(*ratio))
+                                .when(has_divider, Styled::border_t_1),
+                        }
+                    }))
+                    .children(dividers)
+                    .into_any_element()
+            }
         }
+    }
+
+    /// The area around the line after child `boundary` of the split at `path`,
+    /// at `offset` (a ratio of the split) from its start. Dragging it resizes
+    /// the two children next to it, and double-clicking it gives every child
+    /// the same size.
+    fn render_divider(
+        path: &[usize],
+        boundary: usize,
+        axis: Axis,
+        offset: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let dragged = DraggedDivider {
+            path: path.to_vec(),
+            boundary,
+        };
+        let equalize_path = path.to_vec();
+        let handle = div()
+            .id(ElementId::Name(
+                format!("divider-{path:?}-{boundary}").into(),
+            ))
+            .absolute()
+            // Keep presses on the line from also panning a viewer or moving the
+            // window under it.
+            .occlude()
+            .hover(|style| style.bg(rgb(FOCUS_COLOR)))
+            .on_drag(dragged, |_, _, _, cx| {
+                cx.new(|_| DragPreview { label: None })
+            })
+            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                if event.click_count() == 2 {
+                    if let Err(error) = this.workspace.equalize(&equalize_path) {
+                        tracing::error!("{error:#}");
+                    }
+                    cx.notify();
+                }
+            }));
+        // Centered on the line.
+        let half = -DIVIDER_HANDLE_WIDTH / 2.;
+        match axis {
+            Axis::Horizontal => handle
+                .top_0()
+                .h_full()
+                .left(relative(offset))
+                .ml(half)
+                .w(DIVIDER_HANDLE_WIDTH)
+                .cursor(CursorStyle::ResizeLeftRight),
+            Axis::Vertical => handle
+                .left_0()
+                .w_full()
+                .top(relative(offset))
+                .mt(half)
+                .h(DIVIDER_HANDLE_WIDTH)
+                .cursor(CursorStyle::ResizeUpDown),
+        }
+        .into_any_element()
     }
 
     fn render_pane(
@@ -461,6 +987,9 @@ impl WorkspaceView {
             return div().into_any_element();
         };
         let active = pane.active_tab().map(Tab::id);
+        // Only worth marking when there is another pane to tell it from.
+        let marked = self.workspace.focused_pane() == pane_id
+            && !matches!(self.workspace.layout(), Layout::Pane(_));
         let content = match active.and_then(|tab_id| self.views.get(&tab_id)) {
             Some(view) => view.to_element(),
             None => div()
@@ -476,30 +1005,81 @@ impl WorkspaceView {
             .size_full()
             .flex()
             .flex_col()
+            // Pressing anywhere in a pane focuses it, so that keys act on it.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| this.focus_pane(pane_id, cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| this.focus_pane(pane_id, cx)),
+            )
             // A pane at the top keeps its tab bar without tabs, to move the
             // window with.
             .when(!pane.tabs().is_empty() || title_bar.is_some(), |this| {
                 this.child(Self::render_tab_bar(
                     pane_id,
                     pane.tabs(),
+                    active.filter(|_| marked),
                     active,
                     title_bar,
                     window,
                     cx,
                 ))
             })
-            .child(div().flex_1().overflow_hidden().child(content))
+            .child(self.render_pane_content(pane_id, content, cx))
             .into_any_element()
     }
 
+    /// The content of a pane, which takes tabs and images dropped on it.
+    fn render_pane_content(
+        &self,
+        pane_id: PaneId,
+        content: AnyElement,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let zone = self
+            .drop_target
+            .filter(|(id, _)| *id == pane_id && cx.has_active_drag())
+            .map(|(_, zone)| zone);
+        div()
+            .flex_1()
+            .overflow_hidden()
+            .relative()
+            .on_drag_move(
+                cx.listener(move |this, event: &DragMoveEvent<DraggedTab>, _, cx| {
+                    this.update_drop_target(pane_id, event.bounds, event.event.position, cx);
+                }),
+            )
+            .on_drag_move(
+                cx.listener(move |this, event: &DragMoveEvent<DraggedImage>, _, cx| {
+                    this.update_drop_target(pane_id, event.bounds, event.event.position, cx);
+                }),
+            )
+            .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
+                this.drop_tab_on_pane(dragged, pane_id, cx);
+            }))
+            .on_drop(
+                cx.listener(move |this, dragged: &DraggedImage, window, cx| {
+                    this.drop_image_on_pane(dragged, pane_id, window, cx);
+                }),
+            )
+            .child(content)
+            .when_some(zone, |this, zone| this.child(render_drop_zone(zone)))
+    }
+
+    /// `marked` is the active tab of the focused pane, when the focus is worth
+    /// showing.
     fn render_tab_bar(
         pane_id: PaneId,
         tabs: &[Tab],
+        marked: Option<TabId>,
         active: Option<TabId>,
         title_bar: Option<TitleBarPart>,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let tab_count = tabs.len();
         let round_top_left = title_bar.is_some_and(|part| part.round_top_left);
         let round_top_right = title_bar.is_some_and(|part| part.round_top_right);
         let tabs = div()
@@ -509,48 +1089,12 @@ impl WorkspaceView {
             .h_full()
             .overflow_x_scroll()
             .children(tabs.iter().enumerate().map(|(index, tab)| {
-                let tab_id = tab.id();
-                let is_active = active == Some(tab_id);
-                div()
-                    .id(("tab", index))
-                    .when(index == 0 && round_top_left, |this| {
-                        this.rounded_tl(ROUNDING)
-                    })
-                    .flex()
-                    .flex_shrink_0()
-                    .items_center()
-                    .gap_1()
-                    .max_w(px(240.))
-                    .h_full()
-                    .pl_3()
-                    .pr_1()
-                    .border_r_1()
-                    .border_color(rgb(0x2a_2a_2a))
-                    .bg(rgb(if is_active { 0x1e_1e_1e } else { 0x14_14_14 }))
-                    .text_color(rgb(if is_active { 0xe0_e0_e0 } else { 0x90_90_90 }))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.activate_tab(pane_id, tab_id, cx);
-                    }))
-                    .on_mouse_up(
-                        MouseButton::Middle,
-                        cx.listener(move |this, _: &MouseUpEvent, _, cx| {
-                            this.close_tab(pane_id, tab_id, cx);
-                        }),
-                    )
-                    .child(div().min_w_0().truncate().child(tab_name(tab)))
-                    .child(
-                        div()
-                            .id("close")
-                            .flex_shrink_0()
-                            .px_1()
-                            .rounded_sm()
-                            .hover(|style| style.bg(rgb(0x3a_3a_3a)))
-                            .child("×")
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                cx.stop_propagation();
-                                this.close_tab(pane_id, tab_id, cx);
-                            })),
-                    )
+                let look = TabLook {
+                    active: active == Some(tab.id()),
+                    marked: marked == Some(tab.id()),
+                    round_top_left: index == 0 && round_top_left,
+                };
+                Self::render_tab(pane_id, index, tab, look, cx)
             }));
         div()
             .flex()
@@ -562,24 +1106,144 @@ impl WorkspaceView {
             .when(round_top_left, |this| this.rounded_tl(ROUNDING))
             .when(round_top_right, |this| this.rounded_tr(ROUNDING))
             .child(tabs)
-            .when_some(title_bar, |this, part| {
-                this.child(Self::render_drag_area(pane_id, window, cx))
-                    .when(part.controls, |this| {
-                        this.child(window_frame::window_controls(window, round_top_right))
-                    })
+            .child(Self::render_rest_of_tab_bar(
+                pane_id,
+                tab_count,
+                title_bar.is_some(),
+                window,
+                cx,
+            ))
+            .when(title_bar.is_some_and(|part| part.controls), |this| {
+                this.child(window_frame::window_controls(window, round_top_right))
             })
     }
 
-    /// The empty part of a tab bar at the top of the window, which works as a
-    /// title bar.
-    fn render_drag_area(pane_id: PaneId, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let controls = window.window_controls();
+    fn render_tab(
+        pane_id: PaneId,
+        index: usize,
+        tab: &Tab,
+        look: TabLook,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let tab_id = tab.id();
+        let label = SharedString::from(tab_name(tab));
         div()
-            .id(ElementId::Name(format!("drag-area-{pane_id:?}").into()))
-            .flex_1()
+            .id(("tab", index))
+            .when(look.round_top_left, |this| this.rounded_tl(ROUNDING))
+            .flex()
             .flex_shrink_0()
-            .min_w(MIN_DRAG_WIDTH)
+            .items_center()
+            .gap_1()
+            .max_w(px(240.))
             .h_full()
+            .pl_3()
+            .pr_1()
+            .border_r_1()
+            .border_color(rgb(0x2a_2a_2a))
+            .bg(rgb(if look.active { 0x1e_1e_1e } else { 0x14_14_14 }))
+            .text_color(rgb(if look.active { 0xe0_e0_e0 } else { 0x90_90_90 }))
+            .relative()
+            .when(look.marked, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .w_full()
+                        .h(px(2.))
+                        .bg(rgb(FOCUS_COLOR)),
+                )
+            })
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.activate_tab(pane_id, tab_id, cx);
+            }))
+            // Dragging a tab moves it; dropping it (or an image) on a tab puts
+            // it where that tab is, in any pane.
+            .on_drag(
+                DraggedTab {
+                    tab_id,
+                    label: label.clone(),
+                },
+                |dragged, _, _, cx| {
+                    cx.new(|_| DragPreview {
+                        label: Some(dragged.label.clone()),
+                    })
+                },
+            )
+            .drag_over::<DraggedTab>(|style, _, _, _| style.bg(rgb(DROP_TARGET_COLOR)))
+            .drag_over::<DraggedImage>(|style, _, _, _| style.bg(rgb(DROP_TARGET_COLOR)))
+            .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
+                this.move_tab(dragged, pane_id, index, cx);
+            }))
+            .on_drop(
+                cx.listener(move |this, dragged: &DraggedImage, window, cx| {
+                    this.open_image_at(dragged, pane_id, index, window, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.tab_menu = Some(TabMenu {
+                        pane_id,
+                        tab_id,
+                        position: event.position,
+                    });
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(move |this, _: &MouseUpEvent, _, cx| {
+                    this.close_tab(pane_id, tab_id, cx);
+                }),
+            )
+            .child(div().min_w_0().truncate().child(label))
+            .child(
+                div()
+                    .id("close")
+                    .flex_shrink_0()
+                    .px_1()
+                    .rounded_sm()
+                    .hover(|style| style.bg(rgb(0x3a_3a_3a)))
+                    .child("×")
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.close_tab(pane_id, tab_id, cx);
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// The part of a tab bar right of the tabs. A tab dropped on it moves to
+    /// the end. At the top of the window, it works as a title bar when
+    /// `moves_window` is set.
+    fn render_rest_of_tab_bar(
+        pane_id: PaneId,
+        tab_count: usize,
+        moves_window: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let controls = window.window_controls();
+        let rest = div()
+            .id(ElementId::Name(format!("tab-bar-rest-{pane_id:?}").into()))
+            .flex_1()
+            .h_full()
+            .drag_over::<DraggedTab>(|style, _, _, _| style.bg(rgb(DROP_TARGET_COLOR)))
+            .drag_over::<DraggedImage>(|style, _, _, _| style.bg(rgb(DROP_TARGET_COLOR)))
+            .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
+                this.move_tab(dragged, pane_id, tab_count, cx);
+            }))
+            .on_drop(
+                cx.listener(move |this, dragged: &DraggedImage, window, cx| {
+                    this.open_image_at(dragged, pane_id, tab_count, window, cx);
+                }),
+            );
+        if !moves_window {
+            return rest.into_any_element();
+        }
+        rest.flex_shrink_0()
+            .min_w(MIN_DRAG_WIDTH)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, _, _| this.move_pending = true),
@@ -613,6 +1277,19 @@ impl WorkspaceView {
     }
 }
 
+/// The part of a pane that a drop in `zone` would take: all of it, or the half
+/// on that side.
+fn render_drop_zone(zone: DropZone) -> impl IntoElement {
+    let overlay = div().absolute().bg(rgba(DROP_ZONE_COLOR));
+    match zone {
+        DropZone::Center => overlay.inset_0(),
+        DropZone::Edge(Side::Left) => overlay.top_0().left_0().h_full().w_1_2(),
+        DropZone::Edge(Side::Right) => overlay.top_0().right_0().h_full().w_1_2(),
+        DropZone::Edge(Side::Up) => overlay.top_0().left_0().w_full().h_1_2(),
+        DropZone::Edge(Side::Down) => overlay.bottom_0().left_0().w_full().h_1_2(),
+    }
+}
+
 /// The label of a tab: the file or folder name of what it shows.
 fn tab_name(tab: &Tab) -> String {
     let path = match tab.content() {
@@ -628,6 +1305,10 @@ fn tab_name(tab: &Tab) -> String {
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.update_title(window);
+        // A drag that ended outside every pane leaves nothing to show.
+        if !cx.has_active_drag() {
+            self.drop_target = None;
+        }
         let title_bar = self.title_bar_parts(window);
         let content = div()
             .size_full()
@@ -643,7 +1324,34 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::go_back))
             .on_action(cx.listener(Self::go_forward))
             .on_action(cx.listener(Self::go_up))
-            .child(self.render_layout(self.workspace.layout(), &title_bar, window, cx));
+            .on_action(cx.listener(Self::split_right))
+            .on_action(cx.listener(Self::split_down))
+            .on_action(cx.listener(Self::focus_pane_left))
+            .on_action(cx.listener(Self::focus_pane_right))
+            .on_action(cx.listener(Self::focus_pane_up))
+            .on_action(cx.listener(Self::focus_pane_down))
+            .on_action(cx.listener(Self::swap_pane_left))
+            .on_action(cx.listener(Self::swap_pane_right))
+            .on_action(cx.listener(Self::swap_pane_up))
+            .on_action(cx.listener(Self::swap_pane_down))
+            .on_action(cx.listener(Self::layout_single))
+            .on_action(cx.listener(Self::layout_two_columns))
+            .on_action(cx.listener(Self::layout_three_columns))
+            .on_action(cx.listener(Self::layout_grid))
+            .on_action(cx.listener(Self::layout_explorer_and_viewer))
+            .on_action(cx.listener(Self::reopen_closed_tab))
+            .child(self.render_layout(self.workspace.layout(), &[], &title_bar, window, cx))
+            .when_some(self.tab_menu.as_ref(), |this, menu| {
+                this.child(
+                    deferred(
+                        anchored()
+                            .position(menu.position)
+                            .snap_to_window()
+                            .child(Self::render_tab_menu(menu, cx)),
+                    )
+                    .with_priority(1),
+                )
+            });
         window_frame::window_frame(content, window)
     }
 }

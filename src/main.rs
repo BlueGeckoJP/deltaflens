@@ -16,8 +16,11 @@ use gpui::{
 use tracing_subscriber::EnvFilter;
 
 use crate::workspace_view::{
-    ActivateNextTab, ActivatePreviousTab, CloseTab, GoBack, GoForward, GoUp, NewTab, NextImage,
-    Open, PreviousImage, ResetView, WorkspaceView,
+    ActivateNextTab, ActivatePreviousTab, CloseTab, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
+    FocusPaneUp, GoBack, GoForward, GoUp, LayoutExplorerAndViewer, LayoutGrid, LayoutSingle,
+    LayoutThreeColumns, LayoutTwoColumns, NewTab, NextImage, Open, PreviousImage, ReopenClosedTab,
+    ResetView, SplitDown, SplitRight, SwapPaneDown, SwapPaneLeft, SwapPaneRight, SwapPaneUp,
+    WorkspaceView,
 };
 
 actions!(deltaflens, [Quit]);
@@ -50,6 +53,7 @@ fn main() -> Result<()> {
             KeyBinding::new("ctrl-o", Open, None),
             KeyBinding::new("ctrl-n", NewTab, None),
             KeyBinding::new("ctrl-w", CloseTab, None),
+            KeyBinding::new("ctrl-shift-t", ReopenClosedTab, None),
             KeyBinding::new("ctrl-tab", ActivateNextTab, None),
             KeyBinding::new("ctrl-shift-tab", ActivatePreviousTab, None),
             KeyBinding::new("ctrl-q", Quit, None),
@@ -59,6 +63,21 @@ fn main() -> Result<()> {
             KeyBinding::new("alt-left", GoBack, None),
             KeyBinding::new("alt-right", GoForward, None),
             KeyBinding::new("alt-up", GoUp, None),
+            KeyBinding::new("ctrl-k right", SplitRight, None),
+            KeyBinding::new("ctrl-k down", SplitDown, None),
+            KeyBinding::new("ctrl-alt-left", FocusPaneLeft, None),
+            KeyBinding::new("ctrl-alt-right", FocusPaneRight, None),
+            KeyBinding::new("ctrl-alt-up", FocusPaneUp, None),
+            KeyBinding::new("ctrl-alt-down", FocusPaneDown, None),
+            KeyBinding::new("ctrl-alt-shift-left", SwapPaneLeft, None),
+            KeyBinding::new("ctrl-alt-shift-right", SwapPaneRight, None),
+            KeyBinding::new("ctrl-alt-shift-up", SwapPaneUp, None),
+            KeyBinding::new("ctrl-alt-shift-down", SwapPaneDown, None),
+            KeyBinding::new("ctrl-k 1", LayoutSingle, None),
+            KeyBinding::new("ctrl-k 2", LayoutTwoColumns, None),
+            KeyBinding::new("ctrl-k 3", LayoutThreeColumns, None),
+            KeyBinding::new("ctrl-k 4", LayoutGrid, None),
+            KeyBinding::new("ctrl-k 5", LayoutExplorerAndViewer, None),
         ]);
 
         let options = WindowOptions {

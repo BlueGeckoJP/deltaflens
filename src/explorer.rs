@@ -28,6 +28,29 @@ const GRID_PADDING: f32 = 8.;
 /// Opens an entry with its default application. Becomes a setting later.
 const OPEN_COMMAND: &str = "xdg-open <path>";
 
+/// An image being dragged from the explorer, to open it in a pane.
+pub struct DraggedImage {
+    pub path: PathBuf,
+}
+
+/// The name of the dragged image, following the mouse.
+struct DraggedImagePreview {
+    name: SharedString,
+}
+
+impl Render for DraggedImagePreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_3()
+            .py_1()
+            .rounded_sm()
+            .bg(rgb(0x2a_2a_2a))
+            .text_sm()
+            .text_color(rgb(0xe0_e0_e0))
+            .child(self.name.clone())
+    }
+}
+
 pub enum ExplorerEvent {
     /// The explorer moved to another folder.
     Navigated(PathBuf),
@@ -475,6 +498,7 @@ impl Explorer {
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
+        let name_for_preview = name.clone();
         let icon = match entry.kind {
             EntryKind::Folder => folder_icon().into_any_element(),
             EntryKind::Image => {
@@ -527,13 +551,23 @@ impl Explorer {
                     .text_color(rgb(0xd0_d0_d0))
                     .child(name),
             )
-            // A double click opens the entry, as in Dolphin. A single click
-            // does nothing until entries can be selected.
+            // A double click opens the entry. A single click does nothing
+            // until entries can be selected.
             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                 if event.click_count() == 2 {
                     this.open_entry(index, cx);
                 }
             }))
+            .when(entry.kind == EntryKind::Image, |this| {
+                let dragged = DraggedImage {
+                    path: entry.path.clone(),
+                };
+                let name = SharedString::from(name_for_preview);
+                this.on_drag(dragged, move |_, _, _, cx| {
+                    let name = name.clone();
+                    cx.new(|_| DraggedImagePreview { name })
+                })
+            })
             .on_mouse_down(MouseButton::Right, {
                 let path = entry.path.clone();
                 let kind = entry.kind;

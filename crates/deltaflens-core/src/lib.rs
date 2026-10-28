@@ -12,6 +12,7 @@ mod id;
 mod layout;
 mod lru;
 mod pane;
+mod preset;
 mod tab;
 #[cfg(test)]
 mod test_util;
@@ -25,9 +26,10 @@ pub use explorer::{Entry, EntryKind, Sort, SortKey, SortOrder, list_entries, sor
 pub use folder::{Direction, list_images, neighbor_image};
 pub use history::History;
 pub use id::{PaneId, TabId};
-pub use layout::{Axis, Layout};
+pub use layout::{Axis, DropZone, Layout, Side, drop_zone};
 pub use lru::LruCache;
 pub use pane::Pane;
+pub use preset::Preset;
 pub use tab::{Tab, TabContent};
 pub use view::{Point, Rect, Size, ViewTransform};
 pub use workspace::Workspace;
