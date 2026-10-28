@@ -1,8 +1,19 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use eyre::{Result, eyre};
 
 use crate::{Axis, Layout, Pane, PaneId, Preset, Side, Tab, TabContent, TabId};
+
+/// How many closed tabs are remembered to reopen.
+const MAX_CLOSED_TABS: usize = 20;
+
+/// A closed tab, remembered to reopen it where it was.
+#[derive(Debug, Clone, PartialEq)]
+struct ClosedTab {
+    content: TabContent,
+    pane_id: PaneId,
+    index: usize,
+}
 
 /// The layout of a window, its panes and the focused pane.
 #[derive(Debug, Clone)]
@@ -12,6 +23,8 @@ pub struct Workspace {
     focused_pane: PaneId,
     /// Shared by pane and tab IDs.
     next_id: u64,
+    /// The most recently closed tab last.
+    closed_tabs: VecDeque<ClosedTab>,
 }
 
 impl Workspace {
@@ -24,6 +37,7 @@ impl Workspace {
             panes: HashMap::from([(pane_id, Pane::default())]),
             focused_pane: pane_id,
             next_id: 1,
+            closed_tabs: VecDeque::new(),
         }
     }
 
@@ -95,15 +109,49 @@ impl Workspace {
         Ok(())
     }
 
-    /// Closes the tab. A pane left without tabs is closed too, unless it is the
-    /// only pane.
+    /// Closes the tab and remembers it for [`Self::reopen_closed_tab`]. A pane
+    /// left without tabs is closed too, unless it is the only pane.
     ///
     /// # Errors
     ///
     /// Returns an error if the pane has no tab with `tab_id`.
     pub fn close_tab(&mut self, pane_id: PaneId, tab_id: TabId) -> Result<()> {
-        self.pane_mut(pane_id)?.close_tab(tab_id)?;
+        let pane = self.pane_mut(pane_id)?;
+        let index = pane.tabs().iter().position(|tab| tab.id() == tab_id);
+        let tab = pane.take_tab(tab_id)?;
+        if self.closed_tabs.len() == MAX_CLOSED_TABS {
+            self.closed_tabs.pop_front();
+        }
+        self.closed_tabs.push_back(ClosedTab {
+            content: tab.content().clone(),
+            pane_id,
+            index: index.unwrap_or_default(),
+        });
         self.close_pane_if_empty(pane_id)
+    }
+
+    /// Reopens the most recently closed tab whose content still `exists`, and
+    /// forgets it and the ones skipped. It goes back to where it was if its
+    /// pane is still open, and next to the active tab of the focused pane
+    /// otherwise. Its pane is focused.
+    ///
+    /// Returns the reopened tab, or `None` if there was none to reopen.
+    pub fn reopen_closed_tab(&mut self, exists: impl Fn(&TabContent) -> bool) -> Option<TabId> {
+        while let Some(closed) = self.closed_tabs.pop_back() {
+            if !exists(&closed.content) {
+                continue;
+            }
+            let tab_id = TabId(self.allocate_id());
+            let tab = Tab::new(tab_id, closed.content);
+            if let Some(pane) = self.panes.get_mut(&closed.pane_id) {
+                pane.insert_tab(closed.index, tab);
+                self.focused_pane = closed.pane_id;
+            } else {
+                self.panes.get_mut(&self.focused_pane)?.add_tab(tab);
+            }
+            return Some(tab_id);
+        }
+        None
     }
 
     /// See [`Layout::move_boundary`].
@@ -815,6 +863,99 @@ mod tests {
                 .is_err()
         );
         assert_eq!(workspace.layout().pane_ids().len(), 2);
+    }
+
+    fn always(_: &TabContent) -> bool {
+        true
+    }
+
+    #[test]
+    fn reopen_closed_tabs_newest_first_at_their_place() {
+        let mut workspace = Workspace::new();
+        let first = workspace.focused_pane();
+        let a = workspace.open_tab(first, viewer("a.jxl")).unwrap();
+        let b = workspace.open_tab(first, viewer("b.jxl")).unwrap();
+        workspace.open_tab(first, viewer("c.jxl")).unwrap();
+        workspace.close_tab(first, a).unwrap();
+        workspace.close_tab(first, b).unwrap();
+
+        workspace.reopen_closed_tab(always).unwrap();
+        assert_eq!(
+            contents(&workspace, first),
+            [viewer("b.jxl"), viewer("c.jxl")]
+        );
+        assert_eq!(active_content(&workspace, first), Some(viewer("b.jxl")));
+
+        workspace.reopen_closed_tab(always).unwrap();
+        assert_eq!(
+            contents(&workspace, first),
+            [viewer("a.jxl"), viewer("b.jxl"), viewer("c.jxl")]
+        );
+        assert_eq!(workspace.reopen_closed_tab(always), None);
+    }
+
+    #[test]
+    fn closed_tabs_are_limited() {
+        let mut workspace = Workspace::new();
+        let first = workspace.focused_pane();
+        for index in 0..MAX_CLOSED_TABS + 5 {
+            let tab = workspace
+                .open_tab(first, viewer(&format!("{index}.jxl")))
+                .unwrap();
+            workspace.close_tab(first, tab).unwrap();
+        }
+        let mut reopened = 0;
+        while workspace.reopen_closed_tab(always).is_some() {
+            reopened += 1;
+        }
+        assert_eq!(reopened, MAX_CLOSED_TABS);
+        // The oldest were forgotten; the last one reopened is the oldest kept.
+        assert_eq!(active_content(&workspace, first), Some(viewer("5.jxl")));
+    }
+
+    #[test]
+    fn reopen_tab_of_a_closed_pane_in_the_focused_pane() {
+        let (mut workspace, first, second, b) = two_panes();
+        let a = workspace.pane(second).unwrap().tabs()[0].id();
+        workspace.close_tab(second, a).unwrap();
+        workspace.close_tab(second, b).unwrap();
+        assert!(workspace.pane(second).is_err());
+
+        workspace.reopen_closed_tab(always).unwrap();
+
+        assert_eq!(
+            contents(&workspace, first),
+            [viewer("a.jxl"), viewer("b.jxl")]
+        );
+        assert_eq!(workspace.focused_pane(), first);
+    }
+
+    #[test]
+    fn reopen_skips_tabs_whose_file_is_gone() {
+        let mut workspace = Workspace::new();
+        let first = workspace.focused_pane();
+        let a = workspace.open_tab(first, viewer("a.jxl")).unwrap();
+        let b = workspace.open_tab(first, viewer("gone.jxl")).unwrap();
+        workspace.close_tab(first, a).unwrap();
+        workspace.close_tab(first, b).unwrap();
+
+        let exists = |content: &TabContent| *content != viewer("gone.jxl");
+        workspace.reopen_closed_tab(exists).unwrap();
+        assert_eq!(contents(&workspace, first), [viewer("a.jxl")]);
+        assert_eq!(workspace.reopen_closed_tab(exists), None);
+    }
+
+    #[test]
+    fn reopen_into_the_pane_it_was_in() {
+        let (mut workspace, first, second, b) = two_panes();
+        workspace.close_tab(second, b).unwrap();
+        workspace.focus_pane(first).unwrap();
+        workspace.reopen_closed_tab(always).unwrap();
+        assert_eq!(
+            contents(&workspace, second),
+            [viewer("a.jxl"), viewer("b.jxl")]
+        );
+        assert_eq!(workspace.focused_pane(), second);
     }
 
     #[test]

@@ -18,8 +18,9 @@ use tracing_subscriber::EnvFilter;
 use crate::workspace_view::{
     ActivateNextTab, ActivatePreviousTab, CloseTab, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
     FocusPaneUp, GoBack, GoForward, GoUp, LayoutExplorerAndViewer, LayoutGrid, LayoutSingle,
-    LayoutThreeColumns, LayoutTwoColumns, NewTab, NextImage, Open, PreviousImage, ResetView,
-    SplitDown, SplitRight, SwapPaneDown, SwapPaneLeft, SwapPaneRight, SwapPaneUp, WorkspaceView,
+    LayoutThreeColumns, LayoutTwoColumns, NewTab, NextImage, Open, PreviousImage, ReopenClosedTab,
+    ResetView, SplitDown, SplitRight, SwapPaneDown, SwapPaneLeft, SwapPaneRight, SwapPaneUp,
+    WorkspaceView,
 };
 
 actions!(deltaflens, [Quit]);
@@ -52,6 +53,7 @@ fn main() -> Result<()> {
             KeyBinding::new("ctrl-o", Open, None),
             KeyBinding::new("ctrl-n", NewTab, None),
             KeyBinding::new("ctrl-w", CloseTab, None),
+            KeyBinding::new("ctrl-shift-t", ReopenClosedTab, None),
             KeyBinding::new("ctrl-tab", ActivateNextTab, None),
             KeyBinding::new("ctrl-shift-tab", ActivatePreviousTab, None),
             KeyBinding::new("ctrl-q", Quit, None),

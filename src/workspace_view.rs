@@ -51,6 +51,7 @@ actions!(
         LayoutThreeColumns,
         LayoutGrid,
         LayoutExplorerAndViewer,
+        ReopenClosedTab,
     ]
 );
 
@@ -754,6 +755,23 @@ impl WorkspaceView {
             )))
     }
 
+    /// Reopens the most recently closed tab, skipping those whose file or
+    /// folder is gone.
+    fn reopen_closed_tab(
+        &mut self,
+        _: &ReopenClosedTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let exists = |content: &TabContent| match content {
+            TabContent::Viewer { path } => path.is_file(),
+            TabContent::Explorer { dir } => dir.is_dir(),
+        };
+        if self.workspace.reopen_closed_tab(exists).is_some() {
+            self.sync_views(window, cx);
+        }
+    }
+
     fn close_active_tab(&mut self, _: &CloseTab, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(tab_id) = self.active_tab().map(Tab::id) {
             self.close_tab(self.workspace.focused_pane(), tab_id, cx);
@@ -1321,6 +1339,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::layout_three_columns))
             .on_action(cx.listener(Self::layout_grid))
             .on_action(cx.listener(Self::layout_explorer_and_viewer))
+            .on_action(cx.listener(Self::reopen_closed_tab))
             .child(self.render_layout(self.workspace.layout(), &[], &title_bar, window, cx))
             .when_some(self.tab_menu.as_ref(), |this, menu| {
                 this.child(
