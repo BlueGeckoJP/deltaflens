@@ -21,7 +21,7 @@ const GRID_PADDING: f32 = 8.;
 pub enum ExplorerEvent {
     /// The explorer moved to another folder.
     Navigated(PathBuf),
-    /// An image was clicked.
+    /// An image was double-clicked.
     OpenImage(PathBuf),
 }
 
@@ -306,8 +306,12 @@ impl Explorer {
                     .text_color(rgb(0xd0_d0_d0))
                     .child(name),
             )
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                this.open_entry(index, cx);
+            // A double click opens the entry, as in Dolphin. A single click
+            // does nothing until entries can be selected.
+            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                if event.click_count() == 2 {
+                    this.open_entry(index, cx);
+                }
             }))
     }
 }
