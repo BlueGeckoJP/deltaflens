@@ -5,7 +5,7 @@ use std::{
 
 use eyre::{Result, WrapErr};
 
-use crate::is_supported_image;
+use crate::{explorer::is_hidden, is_supported_image};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
@@ -14,7 +14,8 @@ pub enum Direction {
 }
 
 /// Lists the files in `dir` that [`is_supported_image`] accepts, in natural
-/// order of their file names.
+/// order of their file names. Hidden files, whose names start with a dot, are
+/// left out as in the explorer.
 ///
 /// # Errors
 ///
@@ -28,7 +29,7 @@ fn list_images_inner(dir: &Path) -> Result<Vec<PathBuf>> {
     for entry in dir.read_dir()? {
         let path = entry?.path();
         // `is_file` follows symbolic links.
-        if is_supported_image(&path) && path.is_file() {
+        if !is_hidden(&path) && is_supported_image(&path) && path.is_file() {
             images.push(path);
         }
     }
@@ -149,6 +150,31 @@ mod tests {
         fs::create_dir(dir.path().join("folder.png")).unwrap();
         let images = list_images(dir.path()).unwrap();
         assert_eq!(dir.names(&images), ["a.png"]);
+    }
+
+    #[test]
+    fn list_images_skips_hidden_files() {
+        let dir = TempDir::with_files("folder-hidden", &["a.png", ".b.png", "c.png"]);
+        let images = list_images(dir.path()).unwrap();
+        assert_eq!(dir.names(&images), ["a.png", "c.png"]);
+    }
+
+    #[test]
+    fn hidden_image_moves_to_the_images_around_it() {
+        let dir = TempDir::with_files("folder-hidden-neighbor", &["a.png", ".b.png", "c.png"]);
+        let images = list_images(dir.path()).unwrap();
+        let hidden = dir.path().join(".b.png");
+        let name = |path: &Path| path.file_name().unwrap().to_string_lossy().into_owned();
+        // ".b.png" sorts before "a.png", as the dot comes first.
+        let next = neighbor_image(&images, &hidden, Direction::Next).unwrap();
+        assert_eq!(name(next), "a.png");
+        let previous = neighbor_image(&images, &hidden, Direction::Previous).unwrap();
+        assert_eq!(name(previous), "c.png");
+        let prefetch: Vec<String> = prefetch_images(&images, &hidden, Direction::Next, 2)
+            .into_iter()
+            .map(name)
+            .collect();
+        assert_eq!(prefetch, ["a.png", "c.png"]);
     }
 
     #[test]

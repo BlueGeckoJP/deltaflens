@@ -85,7 +85,8 @@ fn list_entries_inner(dir: &Path) -> Result<Vec<Entry>> {
     Ok(entries)
 }
 
-fn is_hidden(path: &Path) -> bool {
+/// Returns whether the name of `path` starts with a dot.
+pub(crate) fn is_hidden(path: &Path) -> bool {
     path.file_name()
         .and_then(OsStr::to_str)
         .is_some_and(|name| name.starts_with('.'))
