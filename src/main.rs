@@ -16,8 +16,9 @@ use gpui::{
 use tracing_subscriber::EnvFilter;
 
 use crate::workspace_view::{
-    ActivateNextTab, ActivatePreviousTab, CloseTab, GoBack, GoForward, GoUp, NewTab, NextImage,
-    Open, PreviousImage, ResetView, WorkspaceView,
+    ActivateNextTab, ActivatePreviousTab, CloseTab, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
+    FocusPaneUp, GoBack, GoForward, GoUp, NewTab, NextImage, Open, PreviousImage, ResetView,
+    SplitDown, SplitRight, WorkspaceView,
 };
 
 actions!(deltaflens, [Quit]);
@@ -59,6 +60,12 @@ fn main() -> Result<()> {
             KeyBinding::new("alt-left", GoBack, None),
             KeyBinding::new("alt-right", GoForward, None),
             KeyBinding::new("alt-up", GoUp, None),
+            KeyBinding::new("ctrl-k right", SplitRight, None),
+            KeyBinding::new("ctrl-k down", SplitDown, None),
+            KeyBinding::new("ctrl-alt-left", FocusPaneLeft, None),
+            KeyBinding::new("ctrl-alt-right", FocusPaneRight, None),
+            KeyBinding::new("ctrl-alt-up", FocusPaneUp, None),
+            KeyBinding::new("ctrl-alt-down", FocusPaneDown, None),
         ]);
 
         let options = WindowOptions {

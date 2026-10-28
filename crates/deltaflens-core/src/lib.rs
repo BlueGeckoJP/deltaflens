@@ -25,7 +25,7 @@ pub use explorer::{Entry, EntryKind, Sort, SortKey, SortOrder, list_entries, sor
 pub use folder::{Direction, list_images, neighbor_image};
 pub use history::History;
 pub use id::{PaneId, TabId};
-pub use layout::{Axis, Layout};
+pub use layout::{Axis, Layout, Side};
 pub use lru::LruCache;
 pub use pane::Pane;
 pub use tab::{Tab, TabContent};
