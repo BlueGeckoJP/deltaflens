@@ -26,7 +26,12 @@ image = { version = "0.25", default-features = false, features = [
     "webp",
 ] }
 jxl-oxide = "0.12"
+# For the file names of the freedesktop thumbnail cache.
+md-5 = "0.10"
 natord = "1.0"
+# The same version as image uses. Reads and writes the text chunks that the
+# freedesktop thumbnail cache keeps in its PNG files.
+png = "0.18"
 tracing = "0.1"
 
 [lints]

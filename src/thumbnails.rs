@@ -6,13 +6,14 @@ use std::{
     time::SystemTime,
 };
 
-use deltaflens_core::{LruCache, thumbnail};
+use deltaflens_core::{LruCache, ThumbnailCache, thumbnail};
 use eyre::Result;
 use gpui::{Context, RenderImage, prelude::*};
 
 use crate::render_image::to_render_image;
 
-/// How many bytes of thumbnails to keep. A 256 x 256 thumbnail takes 256 KiB.
+/// How many bytes of thumbnails to keep in memory. A 256 x 256 thumbnail takes
+/// 256 KiB.
 const CACHE_BYTES: usize = 256 * 1024 * 1024;
 /// How many requests to remember. Older ones are forgotten, so that scrolling
 /// fast through a large folder does not queue every image in it.
@@ -31,8 +32,9 @@ pub struct ThumbnailKey {
     pub size: u32,
 }
 
-/// Makes thumbnails in the background and keeps the recently used ones in
-/// memory. Shared by the explorers of a window.
+/// Makes thumbnails in the background, or reads them from the thumbnail cache
+/// shared with file managers, and keeps the recently used ones in memory.
+/// Shared by the explorers of a window.
 pub struct Thumbnails {
     cache: LruCache<ThumbnailKey, Arc<RenderImage>>,
     /// Requested but not started yet, the latest last.
@@ -43,6 +45,8 @@ pub struct Thumbnails {
     /// Not retried, as the image cannot be decoded.
     failed: HashSet<ThumbnailKey>,
     parallel: usize,
+    /// `None` if the home directory is unknown.
+    disk_cache: Option<ThumbnailCache>,
 }
 
 impl Thumbnails {
@@ -62,6 +66,7 @@ impl Thumbnails {
             in_progress: HashSet::new(),
             failed: HashSet::new(),
             parallel: (threads / 2).clamp(1, MAX_PARALLEL),
+            disk_cache: ThumbnailCache::from_env(),
         }
     }
 
@@ -101,11 +106,18 @@ impl Thumbnails {
             };
             self.pending_set.remove(&key);
             self.in_progress.insert(key.clone());
+            let disk_cache = self.disk_cache.clone();
             cx.spawn(async move |this, cx| {
                 let result = cx
                     .background_spawn({
                         let (path, size) = (key.path.clone(), key.size);
-                        async move { thumbnail(&path, size).and_then(to_render_image) }
+                        async move {
+                            match disk_cache {
+                                Some(cache) => cache.get_or_create(&path, size),
+                                None => thumbnail(&path, size),
+                            }
+                            .and_then(to_render_image)
+                        }
                     })
                     .await;
                 // Fails only if the thumbnails are gone.

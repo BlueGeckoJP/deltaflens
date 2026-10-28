@@ -1271,7 +1271,9 @@ dependencies = [
  "eyre",
  "image",
  "jxl-oxide",
+ "md-5",
  "natord",
+ "png 0.18.1",
  "tracing",
 ]
 
