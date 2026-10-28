@@ -12,6 +12,7 @@ use gpui::{
 
 use crate::{
     explorer::{Explorer, ExplorerEvent},
+    thumbnails::Thumbnails,
     viewer::Viewer,
 };
 
@@ -54,6 +55,7 @@ impl TabView {
 pub struct WorkspaceView {
     workspace: Workspace,
     views: HashMap<TabId, TabView>,
+    thumbnails: Entity<Thumbnails>,
     focus_handle: FocusHandle,
     /// The window title last set, to avoid setting it on every frame.
     title: String,
@@ -66,6 +68,7 @@ impl WorkspaceView {
         Self {
             workspace: Workspace::new(),
             views: HashMap::new(),
+            thumbnails: cx.new(Thumbnails::new),
             focus_handle,
             title: APP_NAME.to_owned(),
         }
@@ -99,7 +102,8 @@ impl WorkspaceView {
                 TabView::Viewer(cx.new(|cx| Viewer::new(path, window, cx)))
             }
             TabContent::Explorer { dir } => {
-                let explorer = cx.new(|cx| Explorer::new(dir, cx));
+                let thumbnails = self.thumbnails.clone();
+                let explorer = cx.new(|cx| Explorer::new(dir, thumbnails, cx));
                 cx.subscribe_in(&explorer, window, move |this, _, event, window, cx| {
                     this.on_explorer_event(tab_id, event, window, cx);
                 })

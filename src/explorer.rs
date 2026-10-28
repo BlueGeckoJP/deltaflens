@@ -5,10 +5,12 @@ use std::{
 
 use deltaflens_core::{Entry, EntryKind, History, Sort, list_entries, sort_entries};
 use gpui::{
-    AnyElement, ClickEvent, Context, EventEmitter, MouseButton, MouseDownEvent,
-    NavigationDirection, Pixels, ScrollStrategy, SharedString, Task, UniformListScrollHandle,
-    Window, container_query, div, prelude::*, px, rgb, uniform_list,
+    AnyElement, ClickEvent, Context, Entity, EventEmitter, MouseButton, MouseDownEvent,
+    NavigationDirection, ObjectFit, Pixels, ScrollStrategy, SharedString, Task,
+    UniformListScrollHandle, Window, container_query, div, img, prelude::*, px, rgb, uniform_list,
 };
+
+use crate::thumbnails::{ThumbnailKey, Thumbnails};
 
 /// The size of a grid cell, including its padding.
 const CELL_WIDTH: f32 = 152.;
@@ -36,12 +38,15 @@ pub struct Explorer {
     /// Dropping it cancels the load, so that only the latest folder is shown.
     load_task: Option<Task<()>>,
     scroll_handle: UniformListScrollHandle,
+    thumbnails: Entity<Thumbnails>,
 }
 
 impl EventEmitter<ExplorerEvent> for Explorer {}
 
 impl Explorer {
-    pub fn new(dir: PathBuf, cx: &mut Context<Self>) -> Self {
+    pub fn new(dir: PathBuf, thumbnails: Entity<Thumbnails>, cx: &mut Context<Self>) -> Self {
+        // Redraw when a thumbnail is ready.
+        cx.observe(&thumbnails, |_, _, cx| cx.notify()).detach();
         let mut this = Self {
             history: History::new(dir),
             sort: Sort::default(),
@@ -49,6 +54,7 @@ impl Explorer {
             error: None,
             load_task: None,
             scroll_handle: UniformListScrollHandle::new(),
+            thumbnails,
         };
         this.load(cx);
         this
@@ -85,6 +91,9 @@ impl Explorer {
 
     fn on_navigated(&mut self, cx: &mut Context<Self>) {
         cx.emit(ExplorerEvent::Navigated(self.dir().to_owned()));
+        let dir = self.dir().to_owned();
+        self.thumbnails
+            .update(cx, |thumbnails, _| thumbnails.keep_requests_in(&dir));
         self.scroll_handle.scroll_to_item(0, ScrollStrategy::Top);
         self.load(cx);
     }
@@ -235,9 +244,13 @@ impl Explorer {
         let scroll_handle = self.scroll_handle.clone();
         container_query(move |size, _, _| {
             let columns = column_count(size.width);
-            uniform_list("entries", count.div_ceil(columns), move |rows, _, cx| {
-                explorer.update(cx, |this, cx| this.render_rows(rows, columns, cx))
-            })
+            uniform_list(
+                "entries",
+                count.div_ceil(columns),
+                move |rows, window, cx| {
+                    explorer.update(cx, |this, cx| this.render_rows(rows, columns, window, cx))
+                },
+            )
             .track_scroll(&scroll_handle)
             .size_full()
             .py(px(GRID_PADDING))
@@ -249,20 +262,29 @@ impl Explorer {
         &self,
         rows: Range<usize>,
         columns: usize,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Vec<impl IntoElement + use<>> {
+        // Truncation is intended; the value is small and positive.
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let thumbnail_size = (ICON_SIZE * window.scale_factor()).round() as u32;
         rows.map(|row| {
             let start = row * columns;
             let end = (start + columns).min(self.entries.len());
             div()
                 .flex()
                 .px(px(GRID_PADDING))
-                .children((start..end).map(|index| self.render_cell(index, cx)))
+                .children((start..end).map(|index| self.render_cell(index, thumbnail_size, cx)))
         })
         .collect()
     }
 
-    fn render_cell(&self, index: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_cell(
+        &self,
+        index: usize,
+        thumbnail_size: u32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let entry = &self.entries[index];
         let name = entry
             .path
@@ -272,7 +294,23 @@ impl Explorer {
             .into_owned();
         let icon = match entry.kind {
             EntryKind::Folder => folder_icon().into_any_element(),
-            EntryKind::Image => image_placeholder(&entry.path).into_any_element(),
+            EntryKind::Image => {
+                let key = ThumbnailKey {
+                    path: entry.path.clone(),
+                    modified: entry.modified,
+                    size: thumbnail_size,
+                };
+                match self
+                    .thumbnails
+                    .update(cx, |thumbnails, cx| thumbnails.get(&key, cx))
+                {
+                    Some(image) => img(image)
+                        .size_full()
+                        .object_fit(ObjectFit::Contain)
+                        .into_any_element(),
+                    None => image_placeholder(&entry.path).into_any_element(),
+                }
+            }
         };
         div()
             .id(("entry", index))
@@ -384,7 +422,8 @@ fn folder_icon() -> impl IntoElement {
         )
 }
 
-/// Stands in for the thumbnail: the extension of the image in a frame.
+/// Stands in for the thumbnail until it is ready, or if the image cannot be
+/// decoded: the extension of the image in a frame.
 fn image_placeholder(path: &Path) -> impl IntoElement {
     let extension = path
         .extension()

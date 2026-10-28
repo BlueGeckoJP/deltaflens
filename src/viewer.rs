@@ -3,16 +3,15 @@ use std::{
     sync::Arc,
 };
 
-use deltaflens_core::{
-    DecodedImage, Direction, ViewTransform, decode, list_images, neighbor_image,
-};
-use eyre::{Result, eyre};
+use deltaflens_core::{Direction, ViewTransform, decode, list_images, neighbor_image};
+use eyre::Result;
 use gpui::{
     Bounds, Context, CursorStyle, DispatchPhase, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Pixels, RenderImage, ScrollDelta, ScrollEvent, SharedString, Task, Window,
     canvas, div, point, prelude::*, px, rgb, size,
 };
-use image::{Frame, RgbaImage};
+
+use crate::render_image::to_render_image;
 
 /// How much one wheel notch zooms.
 const ZOOM_STEP: f32 = 1.2;
@@ -295,15 +294,6 @@ fn listen_to_drag(view: &gpui::Entity<Viewer>, window: &mut Window) {
             }
         }
     });
-}
-
-/// Wraps the pixels without copying them. Both use BGRA, despite the name
-/// `RgbaImage`.
-fn to_render_image(image: DecodedImage) -> Result<Arc<RenderImage>> {
-    let (width, height) = (image.width(), image.height());
-    let buffer = RgbaImage::from_raw(width, height, image.into_pixels())
-        .ok_or_else(|| eyre!("pixel buffer does not match {width}x{height}"))?;
-    Ok(Arc::new(RenderImage::new(vec![Frame::new(buffer)])))
 }
 
 /// The size of the image in logical pixels, so that scale 1.0 shows one image

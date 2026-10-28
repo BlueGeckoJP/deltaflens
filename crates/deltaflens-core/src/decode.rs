@@ -1,9 +1,12 @@
 mod jxl;
+mod thumbnail;
 
 use std::path::Path;
 
 use eyre::{Result, WrapErr};
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
+
+pub use self::thumbnail::thumbnail;
 
 /// A decoded image with 8-bit BGRA pixels, the layout gpui's `RenderImage`
 /// expects.
