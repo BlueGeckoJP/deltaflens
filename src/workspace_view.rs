@@ -3,7 +3,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use deltaflens_core::{Axis, Direction, Layout, PaneId, Side, Tab, TabContent, TabId, Workspace};
+use deltaflens_core::{
+    Axis, Direction, Layout, PaneId, Preset, Side, Tab, TabContent, TabId, Workspace,
+};
 use eyre::{Result, eyre};
 use gpui::{
     AnyElement, ClickEvent, Context, CursorStyle, DragMoveEvent, ElementId, Entity, FocusHandle,
@@ -42,6 +44,11 @@ actions!(
         SwapPaneRight,
         SwapPaneUp,
         SwapPaneDown,
+        LayoutSingle,
+        LayoutTwoColumns,
+        LayoutThreeColumns,
+        LayoutGrid,
+        LayoutExplorerAndViewer,
     ]
 );
 
@@ -491,6 +498,46 @@ impl WorkspaceView {
 
     fn swap_pane_down(&mut self, _: &SwapPaneDown, _: &mut Window, cx: &mut Context<Self>) {
         self.swap_with_neighbor(Side::Down, cx);
+    }
+
+    fn apply_preset(&mut self, preset: Preset, window: &mut Window, cx: &mut Context<Self>) {
+        self.workspace.apply_preset(preset);
+        self.sync_views(window, cx);
+    }
+
+    fn layout_single(&mut self, _: &LayoutSingle, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_preset(Preset::Single, window, cx);
+    }
+
+    fn layout_two_columns(
+        &mut self,
+        _: &LayoutTwoColumns,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_preset(Preset::TwoColumns, window, cx);
+    }
+
+    fn layout_three_columns(
+        &mut self,
+        _: &LayoutThreeColumns,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_preset(Preset::ThreeColumns, window, cx);
+    }
+
+    fn layout_grid(&mut self, _: &LayoutGrid, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_preset(Preset::Grid, window, cx);
+    }
+
+    fn layout_explorer_and_viewer(
+        &mut self,
+        _: &LayoutExplorerAndViewer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_preset(Preset::ExplorerAndViewer, window, cx);
     }
 
     fn focus_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
@@ -994,6 +1041,11 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::swap_pane_right))
             .on_action(cx.listener(Self::swap_pane_up))
             .on_action(cx.listener(Self::swap_pane_down))
+            .on_action(cx.listener(Self::layout_single))
+            .on_action(cx.listener(Self::layout_two_columns))
+            .on_action(cx.listener(Self::layout_three_columns))
+            .on_action(cx.listener(Self::layout_grid))
+            .on_action(cx.listener(Self::layout_explorer_and_viewer))
             .child(self.render_layout(self.workspace.layout(), &[], &title_bar, window, cx))
             .when_some(self.tab_menu.as_ref(), |this, menu| {
                 this.child(

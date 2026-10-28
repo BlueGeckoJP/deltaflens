@@ -35,8 +35,29 @@ impl Pane {
     ///
     /// Returns an error if the pane has no tab with `id`.
     pub fn close_tab(&mut self, id: TabId) -> Result<()> {
+        self.take_tab(id).map(|_| ())
+    }
+
+    /// Adds `tabs` after the last tab. The active tab stays; if there was none,
+    /// the first added tab becomes active.
+    pub(crate) fn append_tabs(&mut self, tabs: Vec<Tab>) {
+        if self.active.is_none() && !tabs.is_empty() {
+            self.active = Some(self.tabs.len());
+        }
+        self.tabs.extend(tabs);
+    }
+
+    /// Removes all tabs and returns them.
+    pub(crate) fn take_tabs(&mut self) -> Vec<Tab> {
+        self.active = None;
+        std::mem::take(&mut self.tabs)
+    }
+
+    /// Removes the tab and returns it. The active tab changes as with
+    /// [`Self::close_tab`].
+    pub(crate) fn take_tab(&mut self, id: TabId) -> Result<Tab> {
         let index = self.index_of(id)?;
-        self.tabs.remove(index);
+        let tab = self.tabs.remove(index);
         self.active = match self.active {
             _ if self.tabs.is_empty() => None,
             Some(active) if index < active => Some(active - 1),
@@ -44,7 +65,7 @@ impl Pane {
             Some(active) if index == active => Some(index.min(self.tabs.len() - 1)),
             active => active,
         };
-        Ok(())
+        Ok(tab)
     }
 
     /// # Errors
@@ -176,6 +197,33 @@ mod tests {
     fn close_last_tab_leaves_pane_empty() {
         let mut pane = pane_with_tabs(1);
         pane.close_tab(TabId(0)).unwrap();
+        assert_eq!(pane.tabs(), []);
+        assert_eq!(active_id(&pane), None);
+    }
+
+    #[test]
+    fn append_tabs_keeps_the_active_tab() {
+        let mut pane = pane_with_tabs(2);
+        pane.activate_tab(TabId(0)).unwrap();
+        pane.append_tabs(vec![tab(5), tab(6)]);
+        assert_eq!(tab_ids(&pane), vec![0, 1, 5, 6]);
+        assert_eq!(active_id(&pane), Some(0));
+    }
+
+    #[test]
+    fn append_tabs_to_empty_pane_activates_the_first() {
+        let mut pane = Pane::default();
+        pane.append_tabs(vec![tab(5), tab(6)]);
+        assert_eq!(active_id(&pane), Some(5));
+        pane.append_tabs(Vec::new());
+        assert_eq!(active_id(&pane), Some(5));
+    }
+
+    #[test]
+    fn take_tabs_empties_the_pane() {
+        let mut pane = pane_with_tabs(2);
+        let tabs = pane.take_tabs();
+        assert_eq!(tabs, vec![tab(0), tab(1)]);
         assert_eq!(pane.tabs(), []);
         assert_eq!(active_id(&pane), None);
     }

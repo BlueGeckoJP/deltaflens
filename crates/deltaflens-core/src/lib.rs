@@ -12,6 +12,7 @@ mod id;
 mod layout;
 mod lru;
 mod pane;
+mod preset;
 mod tab;
 #[cfg(test)]
 mod test_util;
@@ -28,6 +29,7 @@ pub use id::{PaneId, TabId};
 pub use layout::{Axis, Layout, Side};
 pub use lru::LruCache;
 pub use pane::Pane;
+pub use preset::Preset;
 pub use tab::{Tab, TabContent};
 pub use view::{Point, Rect, Size, ViewTransform};
 pub use workspace::Workspace;

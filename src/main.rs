@@ -17,7 +17,8 @@ use tracing_subscriber::EnvFilter;
 
 use crate::workspace_view::{
     ActivateNextTab, ActivatePreviousTab, CloseTab, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
-    FocusPaneUp, GoBack, GoForward, GoUp, NewTab, NextImage, Open, PreviousImage, ResetView,
+    FocusPaneUp, GoBack, GoForward, GoUp, LayoutExplorerAndViewer, LayoutGrid, LayoutSingle,
+    LayoutThreeColumns, LayoutTwoColumns, NewTab, NextImage, Open, PreviousImage, ResetView,
     SplitDown, SplitRight, SwapPaneDown, SwapPaneLeft, SwapPaneRight, SwapPaneUp, WorkspaceView,
 };
 
@@ -70,6 +71,11 @@ fn main() -> Result<()> {
             KeyBinding::new("ctrl-alt-shift-right", SwapPaneRight, None),
             KeyBinding::new("ctrl-alt-shift-up", SwapPaneUp, None),
             KeyBinding::new("ctrl-alt-shift-down", SwapPaneDown, None),
+            KeyBinding::new("ctrl-k 1", LayoutSingle, None),
+            KeyBinding::new("ctrl-k 2", LayoutTwoColumns, None),
+            KeyBinding::new("ctrl-k 3", LayoutThreeColumns, None),
+            KeyBinding::new("ctrl-k 4", LayoutGrid, None),
+            KeyBinding::new("ctrl-k 5", LayoutExplorerAndViewer, None),
         ]);
 
         let options = WindowOptions {

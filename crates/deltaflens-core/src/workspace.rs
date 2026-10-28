@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use eyre::{Result, eyre};
 
-use crate::{Axis, Layout, Pane, PaneId, Side, Tab, TabContent, TabId};
+use crate::{Axis, Layout, Pane, PaneId, Preset, Side, Tab, TabContent, TabId};
 
 /// The layout of a window, its panes and the focused pane.
 #[derive(Debug, Clone)]
@@ -135,6 +135,125 @@ impl Workspace {
     /// Returns an error if there is no split at `path`.
     pub fn equalize(&mut self, path: &[usize]) -> Result<()> {
         self.layout.equalize(path)
+    }
+
+    /// Changes the layout to `preset`, keeping every tab.
+    ///
+    /// The panes go into the new layout in order. If there are too few, the
+    /// new panes get a copy of the active tab of the focused pane. If there are
+    /// too many, the tabs of the extra panes move to the last pane.
+    ///
+    /// For [`Preset::ExplorerAndViewer`], when the focused tab is a viewer, it
+    /// moves to the right and the left shows its folder in an explorer. When
+    /// it is an explorer, it moves to the left. New panes start empty instead
+    /// of with a copy, so that the viewer is not shown twice.
+    pub fn apply_preset(&mut self, preset: Preset) {
+        let focused_tab = self
+            .pane(self.focused_pane)
+            .ok()
+            .and_then(Pane::active_tab)
+            .map(|tab| (tab.id(), tab.content().clone()));
+        let count = preset.pane_count();
+        let mut ids = self.layout.pane_ids();
+        let extra = ids.split_off(count.min(ids.len()));
+        if let Some(&last) = ids.last() {
+            for id in extra {
+                let tabs = self
+                    .panes
+                    .remove(&id)
+                    .map_or_default(|mut pane| pane.take_tabs());
+                if let Some(pane) = self.panes.get_mut(&last) {
+                    pane.append_tabs(tabs);
+                }
+                if self.focused_pane == id {
+                    self.focused_pane = last;
+                }
+            }
+        }
+        let copy = focused_tab
+            .as_ref()
+            .filter(|_| preset != Preset::ExplorerAndViewer)
+            .map(|(_, content)| content.clone());
+        while ids.len() < count {
+            let id = PaneId(self.allocate_id());
+            let mut pane = Pane::default();
+            if let Some(content) = &copy {
+                pane.add_tab(Tab::new(TabId(self.allocate_id()), content.clone()));
+            }
+            self.panes.insert(id, pane);
+            ids.push(id);
+        }
+        self.layout = preset.layout(&ids);
+        if preset == Preset::ExplorerAndViewer
+            && let Some((tab_id, content)) = focused_tab
+        {
+            self.arrange_explorer_and_viewer(ids[0], ids[1], tab_id, content);
+        }
+    }
+
+    /// Puts the focused tab where [`Preset::ExplorerAndViewer`] wants it.
+    fn arrange_explorer_and_viewer(
+        &mut self,
+        left: PaneId,
+        right: PaneId,
+        tab_id: TabId,
+        content: TabContent,
+    ) {
+        match content {
+            TabContent::Viewer { path } => {
+                self.move_tab_to(tab_id, right);
+                self.focused_pane = right;
+                let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) else {
+                    return;
+                };
+                let explorer = TabContent::Explorer {
+                    dir: dir.to_path_buf(),
+                };
+                let existing = self.panes.get(&left).and_then(|pane| {
+                    pane.tabs()
+                        .iter()
+                        .find(|tab| *tab.content() == explorer)
+                        .map(Tab::id)
+                });
+                match existing {
+                    Some(id) => {
+                        if let Some(pane) = self.panes.get_mut(&left) {
+                            let _ = pane.activate_tab(id);
+                        }
+                    }
+                    None => {
+                        let _ = self.open_tab(left, explorer);
+                    }
+                }
+            }
+            TabContent::Explorer { .. } => {
+                self.move_tab_to(tab_id, left);
+                self.focused_pane = left;
+            }
+        }
+    }
+
+    /// Moves the tab to `to`, to the right of its active tab, and activates it
+    /// there. Does nothing if the tab or the pane does not exist.
+    fn move_tab_to(&mut self, tab_id: TabId, to: PaneId) {
+        let Some(from) = self.pane_of_tab(tab_id) else {
+            return;
+        };
+        if from == to {
+            if let Some(pane) = self.panes.get_mut(&to) {
+                let _ = pane.activate_tab(tab_id);
+            }
+            return;
+        }
+        if !self.panes.contains_key(&to) {
+            return;
+        }
+        let Some(Ok(tab)) = self.panes.get_mut(&from).map(|pane| pane.take_tab(tab_id)) else {
+            return;
+        };
+        if let Some(pane) = self.panes.get_mut(&to) {
+            pane.add_tab(tab);
+        }
     }
 
     /// Swaps the tabs of two panes. The panes stay where they are in the
@@ -354,6 +473,190 @@ mod tests {
         let mut workspace = Workspace::new();
         let first = workspace.focused_pane();
         assert!(workspace.close_tab(first, TabId(99)).is_err());
+    }
+
+    fn explorer(dir: &str) -> TabContent {
+        TabContent::Explorer {
+            dir: PathBuf::from(dir),
+        }
+    }
+
+    fn active_content(workspace: &Workspace, pane_id: PaneId) -> Option<TabContent> {
+        workspace
+            .pane(pane_id)
+            .unwrap()
+            .active_tab()
+            .map(|tab| tab.content().clone())
+    }
+
+    /// Every tab of the workspace, pane by pane.
+    fn all_contents(workspace: &Workspace) -> Vec<Vec<TabContent>> {
+        workspace
+            .layout()
+            .pane_ids()
+            .into_iter()
+            .map(|id| contents(workspace, id))
+            .collect()
+    }
+
+    #[test]
+    fn preset_with_more_panes_copies_the_focused_tab() {
+        let mut workspace = Workspace::new();
+        let first = workspace.focused_pane();
+        workspace.open_tab(first, viewer("a.jxl")).unwrap();
+        workspace.open_tab(first, viewer("b.jxl")).unwrap();
+
+        workspace.apply_preset(Preset::ThreeColumns);
+
+        assert_eq!(
+            all_contents(&workspace),
+            [
+                vec![viewer("a.jxl"), viewer("b.jxl")],
+                vec![viewer("b.jxl")],
+                vec![viewer("b.jxl")],
+            ]
+        );
+        assert_eq!(workspace.layout().pane_ids()[0], first);
+        assert_eq!(workspace.focused_pane(), first);
+    }
+
+    #[test]
+    fn preset_with_fewer_panes_moves_the_extra_tabs_to_the_last_pane() {
+        let mut workspace = Workspace::new();
+        workspace.apply_preset(Preset::ThreeColumns);
+        let ids = workspace.layout().pane_ids();
+        for (id, name) in ids.iter().zip(["a.jxl", "b.jxl", "c.jxl"]) {
+            workspace.open_tab(*id, viewer(name)).unwrap();
+        }
+        workspace.focus_pane(ids[2]).unwrap();
+
+        workspace.apply_preset(Preset::Single);
+
+        assert_eq!(workspace.layout(), &Layout::Pane(ids[0]));
+        assert_eq!(
+            contents(&workspace, ids[0]),
+            [viewer("a.jxl"), viewer("b.jxl"), viewer("c.jxl")]
+        );
+        assert_eq!(active_content(&workspace, ids[0]), Some(viewer("a.jxl")));
+        assert_eq!(workspace.focused_pane(), ids[0]);
+        assert!(workspace.pane(ids[2]).is_err());
+    }
+
+    #[test]
+    fn preset_with_the_same_number_of_panes_keeps_the_tabs() {
+        let mut workspace = Workspace::new();
+        workspace.apply_preset(Preset::TwoColumns);
+        let ids = workspace.layout().pane_ids();
+        workspace.open_tab(ids[0], viewer("a.jxl")).unwrap();
+        workspace.open_tab(ids[1], viewer("b.jxl")).unwrap();
+
+        workspace.apply_preset(Preset::TwoColumns);
+
+        assert_eq!(workspace.layout().pane_ids(), ids);
+        assert_eq!(
+            all_contents(&workspace),
+            [vec![viewer("a.jxl")], vec![viewer("b.jxl")]]
+        );
+    }
+
+    #[test]
+    fn preset_of_an_empty_workspace_has_empty_panes() {
+        let mut workspace = Workspace::new();
+        workspace.apply_preset(Preset::Grid);
+        assert_eq!(all_contents(&workspace), vec![Vec::new(); 4]);
+    }
+
+    #[test]
+    fn explorer_and_viewer_from_a_viewer() {
+        let mut workspace = Workspace::new();
+        let first = workspace.focused_pane();
+        workspace.open_tab(first, explorer("/pictures")).unwrap();
+        workspace
+            .open_tab(first, viewer("/pictures/a.jxl"))
+            .unwrap();
+
+        workspace.apply_preset(Preset::ExplorerAndViewer);
+
+        let ids = workspace.layout().pane_ids();
+        // The explorer that already shows the folder is reused.
+        assert_eq!(contents(&workspace, ids[0]), [explorer("/pictures")]);
+        assert_eq!(
+            active_content(&workspace, ids[0]),
+            Some(explorer("/pictures"))
+        );
+        assert_eq!(contents(&workspace, ids[1]), [viewer("/pictures/a.jxl")]);
+        assert_eq!(workspace.focused_pane(), ids[1]);
+    }
+
+    #[test]
+    fn explorer_and_viewer_from_a_single_viewer_opens_an_explorer() {
+        let mut workspace = Workspace::new();
+        let first = workspace.focused_pane();
+        workspace
+            .open_tab(first, viewer("/pictures/a.jxl"))
+            .unwrap();
+
+        workspace.apply_preset(Preset::ExplorerAndViewer);
+
+        assert_eq!(
+            all_contents(&workspace),
+            [vec![explorer("/pictures")], vec![viewer("/pictures/a.jxl")]]
+        );
+    }
+
+    #[test]
+    fn explorer_and_viewer_opens_the_folder_of_the_image() {
+        let mut workspace = Workspace::new();
+        workspace.apply_preset(Preset::TwoColumns);
+        let ids = workspace.layout().pane_ids();
+        workspace
+            .open_tab(ids[0], viewer("/pictures/a.jxl"))
+            .unwrap();
+        workspace.open_tab(ids[1], viewer("/other/b.jxl")).unwrap();
+        workspace.focus_pane(ids[0]).unwrap();
+
+        workspace.apply_preset(Preset::ExplorerAndViewer);
+
+        assert_eq!(contents(&workspace, ids[0]), [explorer("/pictures")]);
+        assert_eq!(
+            contents(&workspace, ids[1]),
+            [viewer("/other/b.jxl"), viewer("/pictures/a.jxl")]
+        );
+        assert_eq!(
+            active_content(&workspace, ids[1]),
+            Some(viewer("/pictures/a.jxl"))
+        );
+    }
+
+    #[test]
+    fn explorer_and_viewer_from_an_explorer() {
+        let mut workspace = Workspace::new();
+        workspace.apply_preset(Preset::TwoColumns);
+        let ids = workspace.layout().pane_ids();
+        workspace
+            .open_tab(ids[0], viewer("/pictures/a.jxl"))
+            .unwrap();
+        workspace.open_tab(ids[1], explorer("/pictures")).unwrap();
+        workspace
+            .open_tab(ids[1], viewer("/pictures/b.jxl"))
+            .unwrap();
+        let pane = workspace.pane_mut(ids[1]).unwrap();
+        let explorer_tab = pane.tabs()[0].id();
+        pane.activate_tab(explorer_tab).unwrap();
+        workspace.focus_pane(ids[1]).unwrap();
+
+        workspace.apply_preset(Preset::ExplorerAndViewer);
+
+        assert_eq!(
+            contents(&workspace, ids[0]),
+            [viewer("/pictures/a.jxl"), explorer("/pictures")]
+        );
+        assert_eq!(
+            active_content(&workspace, ids[0]),
+            Some(explorer("/pictures"))
+        );
+        assert_eq!(contents(&workspace, ids[1]), [viewer("/pictures/b.jxl")]);
+        assert_eq!(workspace.focused_pane(), ids[0]);
     }
 
     #[test]
