@@ -4,17 +4,19 @@ use std::{
 };
 
 use deltaflens_core::{
-    Axis, Direction, Layout, PaneId, Preset, Side, Tab, TabContent, TabId, Workspace,
+    Axis, Direction, DropZone, Layout, PaneId, Preset, Side, Tab, TabContent, TabId, Workspace,
+    drop_zone,
 };
 use eyre::{Result, eyre};
 use gpui::{
-    AnyElement, ClickEvent, Context, CursorStyle, DragMoveEvent, ElementId, Entity, FocusHandle,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point,
-    SharedString, Window, actions, anchored, deferred, div, prelude::*, px, relative, rgb,
+    AnyElement, Bounds, ClickEvent, Context, CursorStyle, DragMoveEvent, ElementId, Entity,
+    FocusHandle, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions,
+    Pixels, Point, SharedString, Window, actions, anchored, deferred, div, prelude::*, px,
+    relative, rgb, rgba,
 };
 
 use crate::{
-    explorer::{Explorer, ExplorerEvent},
+    explorer::{DraggedImage, Explorer, ExplorerEvent},
     thumbnails::Thumbnails,
     viewer::Viewer,
     window_frame::{self, ROUNDING},
@@ -79,7 +81,6 @@ struct DraggedDivider {
 
 /// A tab being dragged.
 struct DraggedTab {
-    pane_id: PaneId,
     tab_id: TabId,
     label: SharedString,
 }
@@ -87,6 +88,8 @@ struct DraggedTab {
 /// The background of the tab, or of the empty part of a tab bar, that a
 /// dragged tab is dropped before (or at the end of).
 const DROP_TARGET_COLOR: u32 = 0x2a_3a_4a;
+/// The part of a pane that a dragged tab or image would take, shown over it.
+const DROP_ZONE_COLOR: u32 = 0x5b_9b_e0_40;
 
 /// What follows the mouse while dragging: the name of a tab, or nothing for a
 /// line between panes.
@@ -166,6 +169,8 @@ pub struct WorkspaceView {
     /// tab bar.
     move_pending: bool,
     tab_menu: Option<TabMenu>,
+    /// Where a tab or image dragged over a pane would go.
+    drop_target: Option<(PaneId, DropZone)>,
 }
 
 impl WorkspaceView {
@@ -180,6 +185,7 @@ impl WorkspaceView {
             title: APP_NAME.to_owned(),
             move_pending: false,
             tab_menu: None,
+            drop_target: None,
         }
     }
 
@@ -467,8 +473,7 @@ impl WorkspaceView {
         }
     }
 
-    /// Moves a dragged tab to `index` in `pane_id`. Only moves within the same
-    /// pane.
+    /// Moves a dragged tab to `index` in `pane_id`, from any pane.
     fn move_tab(
         &mut self,
         dragged: &DraggedTab,
@@ -476,17 +481,116 @@ impl WorkspaceView {
         index: usize,
         cx: &mut Context<Self>,
     ) {
-        if dragged.pane_id != pane_id {
-            return;
+        if let Err(error) = self
+            .workspace
+            .move_tab(dragged.tab_id, pane_id, Some(index))
+        {
+            tracing::error!("{error:#}");
         }
+        cx.notify();
+    }
+
+    /// Opens a dragged image in a new tab at `index` in `pane_id`.
+    fn open_image_at(
+        &mut self,
+        dragged: &DraggedImage,
+        pane_id: PaneId,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let content = TabContent::Viewer {
+            path: dragged.path.clone(),
+        };
         let result = self
             .workspace
-            .pane_mut(pane_id)
-            .and_then(|pane| pane.move_tab(dragged.tab_id, index));
+            .open_tab(pane_id, content)
+            .and_then(|tab_id| {
+                self.workspace.focus_pane(pane_id)?;
+                self.workspace.move_tab(tab_id, pane_id, Some(index))
+            });
+        if let Err(error) = result {
+            tracing::error!("{error:#}");
+        }
+        self.sync_views(window, cx);
+    }
+
+    /// Remembers where a tab or image dragged over `pane_id` would go, from the
+    /// mouse at `position` and the pane's content at `bounds`.
+    fn update_drop_target(
+        &mut self,
+        pane_id: PaneId,
+        bounds: Bounds<Pixels>,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let target = if bounds.contains(&position) {
+            let offset = position - bounds.origin;
+            let zone = drop_zone(
+                f32::from(bounds.size.width),
+                f32::from(bounds.size.height),
+                f32::from(offset.x),
+                f32::from(offset.y),
+            );
+            Some((pane_id, zone))
+        } else if self.drop_target.is_some_and(|(id, _)| id == pane_id) {
+            None
+        } else {
+            return;
+        };
+        if self.drop_target != target {
+            self.drop_target = target;
+            cx.notify();
+        }
+    }
+
+    /// Where a drop on `pane_id` goes, as last shown.
+    fn take_drop_zone(&mut self, pane_id: PaneId) -> DropZone {
+        match self.drop_target.take() {
+            Some((id, zone)) if id == pane_id => zone,
+            _ => DropZone::Center,
+        }
+    }
+
+    /// Moves a tab dropped on the content of `pane_id` into it, or into a new
+    /// pane split off on the edge it was dropped on.
+    fn drop_tab_on_pane(&mut self, dragged: &DraggedTab, pane_id: PaneId, cx: &mut Context<Self>) {
+        let result = match self.take_drop_zone(pane_id) {
+            DropZone::Center => self.workspace.move_tab(dragged.tab_id, pane_id, None),
+            DropZone::Edge(side) => self
+                .workspace
+                .move_tab_to_split(dragged.tab_id, pane_id, side)
+                .map(|_| ()),
+        };
         if let Err(error) = result {
             tracing::error!("{error:#}");
         }
         cx.notify();
+    }
+
+    /// Opens an image dropped on the content of `pane_id` in a new tab there,
+    /// or in a new pane split off on the edge it was dropped on.
+    fn drop_image_on_pane(
+        &mut self,
+        dragged: &DraggedImage,
+        pane_id: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let content = TabContent::Viewer {
+            path: dragged.path.clone(),
+        };
+        let result = match self.take_drop_zone(pane_id) {
+            DropZone::Center => self
+                .workspace
+                .focus_pane(pane_id)
+                .and_then(|()| self.workspace.open_tab(pane_id, content)),
+            DropZone::Edge(side) => self.workspace.open_tab_in_split(pane_id, side, content),
+        };
+        if let Err(error) = result {
+            tracing::error!("{error:#}");
+        }
+        self.sync_views(window, cx);
     }
 
     /// Splits the focused pane, copying its active tab into the new pane.
@@ -905,8 +1009,45 @@ impl WorkspaceView {
                     cx,
                 ))
             })
-            .child(div().flex_1().overflow_hidden().child(content))
+            .child(self.render_pane_content(pane_id, content, cx))
             .into_any_element()
+    }
+
+    /// The content of a pane, which takes tabs and images dropped on it.
+    fn render_pane_content(
+        &self,
+        pane_id: PaneId,
+        content: AnyElement,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let zone = self
+            .drop_target
+            .filter(|(id, _)| *id == pane_id && cx.has_active_drag())
+            .map(|(_, zone)| zone);
+        div()
+            .flex_1()
+            .overflow_hidden()
+            .relative()
+            .on_drag_move(
+                cx.listener(move |this, event: &DragMoveEvent<DraggedTab>, _, cx| {
+                    this.update_drop_target(pane_id, event.bounds, event.event.position, cx);
+                }),
+            )
+            .on_drag_move(
+                cx.listener(move |this, event: &DragMoveEvent<DraggedImage>, _, cx| {
+                    this.update_drop_target(pane_id, event.bounds, event.event.position, cx);
+                }),
+            )
+            .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
+                this.drop_tab_on_pane(dragged, pane_id, cx);
+            }))
+            .on_drop(
+                cx.listener(move |this, dragged: &DraggedImage, window, cx| {
+                    this.drop_image_on_pane(dragged, pane_id, window, cx);
+                }),
+            )
+            .child(content)
+            .when_some(zone, |this, zone| this.child(render_drop_zone(zone)))
     }
 
     /// `marked` is the active tab of the focused pane, when the focus is worth
@@ -998,11 +1139,10 @@ impl WorkspaceView {
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 this.activate_tab(pane_id, tab_id, cx);
             }))
-            // Dragging a tab moves it; dropping it on another tab of the same
-            // pane puts it where that tab is.
+            // Dragging a tab moves it; dropping it (or an image) on a tab puts
+            // it where that tab is, in any pane.
             .on_drag(
                 DraggedTab {
-                    pane_id,
                     tab_id,
                     label: label.clone(),
                 },
@@ -1012,11 +1152,16 @@ impl WorkspaceView {
                     })
                 },
             )
-            .can_drop(move |dragged, _, _| is_tab_of(dragged, pane_id))
             .drag_over::<DraggedTab>(|style, _, _, _| style.bg(rgb(DROP_TARGET_COLOR)))
+            .drag_over::<DraggedImage>(|style, _, _, _| style.bg(rgb(DROP_TARGET_COLOR)))
             .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
                 this.move_tab(dragged, pane_id, index, cx);
             }))
+            .on_drop(
+                cx.listener(move |this, dragged: &DraggedImage, window, cx| {
+                    this.open_image_at(dragged, pane_id, index, window, cx);
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -1066,11 +1211,16 @@ impl WorkspaceView {
             .id(ElementId::Name(format!("tab-bar-rest-{pane_id:?}").into()))
             .flex_1()
             .h_full()
-            .can_drop(move |dragged, _, _| is_tab_of(dragged, pane_id))
             .drag_over::<DraggedTab>(|style, _, _, _| style.bg(rgb(DROP_TARGET_COLOR)))
+            .drag_over::<DraggedImage>(|style, _, _, _| style.bg(rgb(DROP_TARGET_COLOR)))
             .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
                 this.move_tab(dragged, pane_id, tab_count, cx);
-            }));
+            }))
+            .on_drop(
+                cx.listener(move |this, dragged: &DraggedImage, window, cx| {
+                    this.open_image_at(dragged, pane_id, tab_count, window, cx);
+                }),
+            );
         if !moves_window {
             return rest.into_any_element();
         }
@@ -1109,11 +1259,17 @@ impl WorkspaceView {
     }
 }
 
-/// Whether `dragged` is a tab of the pane.
-fn is_tab_of(dragged: &dyn std::any::Any, pane_id: PaneId) -> bool {
-    dragged
-        .downcast_ref::<DraggedTab>()
-        .is_some_and(|tab| tab.pane_id == pane_id)
+/// The part of a pane that a drop in `zone` would take: all of it, or the half
+/// on that side.
+fn render_drop_zone(zone: DropZone) -> impl IntoElement {
+    let overlay = div().absolute().bg(rgba(DROP_ZONE_COLOR));
+    match zone {
+        DropZone::Center => overlay.inset_0(),
+        DropZone::Edge(Side::Left) => overlay.top_0().left_0().h_full().w_1_2(),
+        DropZone::Edge(Side::Right) => overlay.top_0().right_0().h_full().w_1_2(),
+        DropZone::Edge(Side::Up) => overlay.top_0().left_0().w_full().h_1_2(),
+        DropZone::Edge(Side::Down) => overlay.bottom_0().left_0().w_full().h_1_2(),
+    }
 }
 
 /// The label of a tab: the file or folder name of what it shows.
@@ -1131,6 +1287,10 @@ fn tab_name(tab: &Tab) -> String {
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.update_title(window);
+        // A drag that ended outside every pane leaves nothing to show.
+        if !cx.has_active_drag() {
+            self.drop_target = None;
+        }
         let title_bar = self.title_bar_parts(window);
         let content = div()
             .size_full()

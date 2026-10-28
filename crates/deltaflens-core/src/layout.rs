@@ -20,6 +20,51 @@ pub enum Side {
     Down,
 }
 
+/// Where something dragged over a pane would go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropZone {
+    /// Into the pane.
+    Center,
+    /// Into a new pane split off on this side.
+    Edge(Side),
+}
+
+/// The share of a pane's width (height) along each side that counts as the
+/// edge on that side.
+const EDGE_SHARE: f32 = 0.25;
+
+/// Where a drop at `x`, `y` in a pane of `width` × `height` would go: an edge
+/// when it is within a quarter of the size from that edge (the closest edge if
+/// several), and the center otherwise.
+#[must_use]
+pub fn drop_zone(width: f32, height: f32, x: f32, y: f32) -> DropZone {
+    if width <= 0. || height <= 0. {
+        return DropZone::Center;
+    }
+    let (x, y) = (x / width, y / height);
+    let distances = [
+        (Side::Left, x),
+        (Side::Right, 1. - x),
+        (Side::Up, y),
+        (Side::Down, 1. - y),
+    ];
+    let (side, distance) =
+        distances
+            .into_iter()
+            .fold((Side::Left, f32::INFINITY), |closest, candidate| {
+                if candidate.1 < closest.1 {
+                    candidate
+                } else {
+                    closest
+                }
+            });
+    if distance < EDGE_SHARE {
+        DropZone::Edge(side)
+    } else {
+        DropZone::Center
+    }
+}
+
 /// How close two edges must be, in the unit square, to count as touching.
 const EDGE_TOLERANCE: f32 = 1e-4;
 
@@ -45,23 +90,44 @@ impl Layout {
     ///
     /// Returns an error if `target` is not in the layout.
     pub fn split(&mut self, target: PaneId, axis: Axis, new_pane: PaneId) -> Result<()> {
-        if self.split_inner(target, axis, new_pane) {
+        let side = match axis {
+            Axis::Horizontal => Side::Right,
+            Axis::Vertical => Side::Down,
+        };
+        self.split_toward(target, side, new_pane)
+    }
+
+    /// Like [`Self::split`], but places `new_pane` on `side` of `target`:
+    /// before it for [`Side::Left`] and [`Side::Up`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `target` is not in the layout.
+    pub fn split_toward(&mut self, target: PaneId, side: Side, new_pane: PaneId) -> Result<()> {
+        if self.split_inner(target, side, new_pane) {
             Ok(())
         } else {
             Err(eyre!("pane {target:?} is not in the layout"))
         }
     }
 
-    fn split_inner(&mut self, target: PaneId, axis: Axis, new_pane: PaneId) -> bool {
+    fn split_inner(&mut self, target: PaneId, side: Side, new_pane: PaneId) -> bool {
+        let (axis, before) = match side {
+            Side::Left => (Axis::Horizontal, true),
+            Side::Right => (Axis::Horizontal, false),
+            Side::Up => (Axis::Vertical, true),
+            Side::Down => (Axis::Vertical, false),
+        };
         match self {
             Layout::Pane(id) => {
                 if *id != target {
                     return false;
                 }
-                *self = Layout::Split {
-                    axis,
-                    children: vec![(Layout::Pane(target), 0.5), (Layout::Pane(new_pane), 0.5)],
-                };
+                let mut children = vec![(Layout::Pane(target), 0.5), (Layout::Pane(new_pane), 0.5)];
+                if before {
+                    children.reverse();
+                }
+                *self = Layout::Split { axis, children };
                 true
             }
             Layout::Split {
@@ -75,12 +141,13 @@ impl Layout {
                 {
                     let half = children[index].1 / 2.0;
                     children[index].1 = half;
-                    children.insert(index + 1, (Layout::Pane(new_pane), half));
+                    let at = if before { index } else { index + 1 };
+                    children.insert(at, (Layout::Pane(new_pane), half));
                     return true;
                 }
                 children
                     .iter_mut()
-                    .any(|(child, _)| child.split_inner(target, axis, new_pane))
+                    .any(|(child, _)| child.split_inner(target, side, new_pane))
             }
         }
     }
@@ -465,6 +532,58 @@ mod tests {
             .unwrap();
         layout.split(PaneId(1), Axis::Vertical, PaneId(2)).unwrap();
         layout
+    }
+
+    #[test]
+    fn split_toward_left_and_up_places_the_new_pane_before() {
+        let mut layout = pane(0);
+        layout
+            .split_toward(PaneId(0), Side::Left, PaneId(1))
+            .unwrap();
+        assert_eq!(
+            layout,
+            split(Axis::Horizontal, vec![(pane(1), 0.5), (pane(0), 0.5)])
+        );
+        layout
+            .split_toward(PaneId(0), Side::Left, PaneId(2))
+            .unwrap();
+        assert_eq!(
+            layout,
+            split(
+                Axis::Horizontal,
+                vec![(pane(1), 0.5), (pane(2), 0.25), (pane(0), 0.25)]
+            )
+        );
+        layout.split_toward(PaneId(0), Side::Up, PaneId(3)).unwrap();
+        assert_eq!(layout.neighbor(PaneId(0), Side::Up), Some(PaneId(3)));
+    }
+
+    #[test]
+    fn drop_zone_edges_and_center() {
+        assert_eq!(drop_zone(100., 100., 50., 50.), DropZone::Center);
+        assert_eq!(drop_zone(100., 100., 10., 50.), DropZone::Edge(Side::Left));
+        assert_eq!(drop_zone(100., 100., 90., 50.), DropZone::Edge(Side::Right));
+        assert_eq!(drop_zone(100., 100., 50., 10.), DropZone::Edge(Side::Up));
+        assert_eq!(drop_zone(100., 100., 50., 90.), DropZone::Edge(Side::Down));
+        // Just inside the center.
+        assert_eq!(drop_zone(100., 100., 25., 50.), DropZone::Center);
+    }
+
+    #[test]
+    fn drop_zone_in_a_corner_picks_the_closest_edge() {
+        assert_eq!(drop_zone(100., 100., 5., 20.), DropZone::Edge(Side::Left));
+        assert_eq!(drop_zone(100., 100., 20., 5.), DropZone::Edge(Side::Up));
+    }
+
+    #[test]
+    fn drop_zone_is_relative_to_the_size() {
+        assert_eq!(drop_zone(400., 100., 80., 50.), DropZone::Edge(Side::Left));
+        assert_eq!(drop_zone(400., 100., 120., 50.), DropZone::Center);
+    }
+
+    #[test]
+    fn drop_zone_of_an_empty_pane_is_the_center() {
+        assert_eq!(drop_zone(0., 0., 0., 0.), DropZone::Center);
     }
 
     #[test]

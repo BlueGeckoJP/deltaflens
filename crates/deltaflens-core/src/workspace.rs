@@ -102,12 +102,8 @@ impl Workspace {
     ///
     /// Returns an error if the pane has no tab with `tab_id`.
     pub fn close_tab(&mut self, pane_id: PaneId, tab_id: TabId) -> Result<()> {
-        let pane = self.pane_mut(pane_id)?;
-        pane.close_tab(tab_id)?;
-        if pane.tabs().is_empty() && self.layout != Layout::Pane(pane_id) {
-            self.close_pane(pane_id)?;
-        }
-        Ok(())
+        self.pane_mut(pane_id)?.close_tab(tab_id)?;
+        self.close_pane_if_empty(pane_id)
     }
 
     /// See [`Layout::move_boundary`].
@@ -236,24 +232,96 @@ impl Workspace {
     /// Moves the tab to `to`, to the right of its active tab, and activates it
     /// there. Does nothing if the tab or the pane does not exist.
     fn move_tab_to(&mut self, tab_id: TabId, to: PaneId) {
-        let Some(from) = self.pane_of_tab(tab_id) else {
-            return;
-        };
+        let _ = self.transfer_tab(tab_id, to, None);
+    }
+
+    /// Moves the tab to `index` in `to` (or to the right of its active tab),
+    /// and activates it there. A pane left empty stays.
+    fn transfer_tab(&mut self, tab_id: TabId, to: PaneId, index: Option<usize>) -> Result<PaneId> {
+        let from = self
+            .pane_of_tab(tab_id)
+            .ok_or_else(|| eyre!("tab {tab_id:?} is not open"))?;
+        self.pane(to)?;
         if from == to {
-            if let Some(pane) = self.panes.get_mut(&to) {
-                let _ = pane.activate_tab(tab_id);
+            let pane = self.pane_mut(to)?;
+            if let Some(index) = index {
+                pane.move_tab(tab_id, index)?;
             }
-            return;
+            pane.activate_tab(tab_id)?;
+            return Ok(from);
         }
-        if !self.panes.contains_key(&to) {
-            return;
+        let tab = self.pane_mut(from)?.take_tab(tab_id)?;
+        let pane = self.pane_mut(to)?;
+        match index {
+            Some(index) => pane.insert_tab(index, tab),
+            None => pane.add_tab(tab),
         }
-        let Some(Ok(tab)) = self.panes.get_mut(&from).map(|pane| pane.take_tab(tab_id)) else {
-            return;
-        };
-        if let Some(pane) = self.panes.get_mut(&to) {
-            pane.add_tab(tab);
+        Ok(from)
+    }
+
+    /// Closes `pane_id` if it has no tabs, unless it is the only pane.
+    fn close_pane_if_empty(&mut self, pane_id: PaneId) -> Result<()> {
+        if self.pane(pane_id)?.tabs().is_empty() && self.layout != Layout::Pane(pane_id) {
+            self.close_pane(pane_id)?;
         }
+        Ok(())
+    }
+
+    /// Moves the tab to `index` in `to` (or to the right of its active tab),
+    /// activates it and focuses `to`. A pane left without tabs is closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the tab is not open or `to` does not exist.
+    pub fn move_tab(&mut self, tab_id: TabId, to: PaneId, index: Option<usize>) -> Result<()> {
+        let from = self.transfer_tab(tab_id, to, index)?;
+        self.focused_pane = to;
+        self.close_pane_if_empty(from)
+    }
+
+    /// Splits `target` toward `side` and moves the tab into the new pane, which
+    /// is focused. A pane left without tabs is closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the tab is not open or `target` does not exist.
+    pub fn move_tab_to_split(
+        &mut self,
+        tab_id: TabId,
+        target: PaneId,
+        side: Side,
+    ) -> Result<PaneId> {
+        self.pane_of_tab(tab_id)
+            .ok_or_else(|| eyre!("tab {tab_id:?} is not open"))?;
+        let new_id = self.split_empty(target, side)?;
+        self.move_tab(tab_id, new_id, None)?;
+        Ok(new_id)
+    }
+
+    /// Splits `target` toward `side` and opens `content` in the new pane, which
+    /// is focused.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `target` does not exist.
+    pub fn open_tab_in_split(
+        &mut self,
+        target: PaneId,
+        side: Side,
+        content: TabContent,
+    ) -> Result<TabId> {
+        let new_id = self.split_empty(target, side)?;
+        self.focused_pane = new_id;
+        self.open_tab(new_id, content)
+    }
+
+    /// Splits `target` toward `side` with a new, empty pane.
+    fn split_empty(&mut self, target: PaneId, side: Side) -> Result<PaneId> {
+        self.pane(target)?;
+        let new_id = PaneId(self.allocate_id());
+        self.layout.split_toward(target, side, new_id)?;
+        self.panes.insert(new_id, Pane::default());
+        Ok(new_id)
     }
 
     /// Swaps the tabs of two panes. The panes stay where they are in the
@@ -657,6 +725,96 @@ mod tests {
         );
         assert_eq!(contents(&workspace, ids[1]), [viewer("/pictures/b.jxl")]);
         assert_eq!(workspace.focused_pane(), ids[0]);
+    }
+
+    /// Two panes side by side: `a.jxl` on the left, `a.jxl` and `b.jxl` on the
+    /// right. Returns the panes and the tab of `b.jxl`.
+    fn two_panes() -> (Workspace, PaneId, PaneId, TabId) {
+        let mut workspace = Workspace::new();
+        let first = workspace.focused_pane();
+        workspace.open_tab(first, viewer("a.jxl")).unwrap();
+        let second = workspace.split_pane(first, Axis::Horizontal).unwrap();
+        let b = workspace.open_tab(second, viewer("b.jxl")).unwrap();
+        (workspace, first, second, b)
+    }
+
+    #[test]
+    fn move_tab_to_another_pane() {
+        let (mut workspace, first, second, b) = two_panes();
+        workspace.move_tab(b, first, Some(0)).unwrap();
+        assert_eq!(
+            contents(&workspace, first),
+            [viewer("b.jxl"), viewer("a.jxl")]
+        );
+        assert_eq!(active_content(&workspace, first), Some(viewer("b.jxl")));
+        assert_eq!(contents(&workspace, second), [viewer("a.jxl")]);
+        assert_eq!(workspace.focused_pane(), first);
+    }
+
+    #[test]
+    fn move_last_tab_closes_its_pane() {
+        let (mut workspace, first, second, b) = two_panes();
+        let a = workspace.pane(second).unwrap().tabs()[0].id();
+        workspace.move_tab(a, first, None).unwrap();
+        workspace.move_tab(b, first, None).unwrap();
+        assert_eq!(workspace.layout(), &Layout::Pane(first));
+        assert_eq!(contents(&workspace, first).len(), 3);
+        assert_eq!(workspace.focused_pane(), first);
+    }
+
+    #[test]
+    fn move_tab_within_its_pane_reorders() {
+        let (mut workspace, _, second, b) = two_panes();
+        workspace.move_tab(b, second, Some(0)).unwrap();
+        assert_eq!(
+            contents(&workspace, second),
+            [viewer("b.jxl"), viewer("a.jxl")]
+        );
+    }
+
+    #[test]
+    fn move_tab_to_a_split() {
+        let (mut workspace, first, second, b) = two_panes();
+        let new = workspace.move_tab_to_split(b, first, Side::Down).unwrap();
+        assert_eq!(workspace.layout().neighbor(first, Side::Down), Some(new));
+        assert_eq!(contents(&workspace, new), [viewer("b.jxl")]);
+        assert_eq!(contents(&workspace, second), [viewer("a.jxl")]);
+        assert_eq!(workspace.focused_pane(), new);
+    }
+
+    #[test]
+    fn move_only_tab_to_a_split_of_its_own_pane() {
+        // Splitting off the only tab of a pane leaves the old pane empty, so it
+        // closes and the tab ends up in a pane of its own at the same place.
+        let (mut workspace, first, second, b) = two_panes();
+        let a = workspace.pane(second).unwrap().tabs()[0].id();
+        workspace.close_tab(second, a).unwrap();
+        let new = workspace.move_tab_to_split(b, second, Side::Left).unwrap();
+        assert_eq!(workspace.layout().pane_ids(), vec![first, new]);
+        assert_eq!(contents(&workspace, new), [viewer("b.jxl")]);
+    }
+
+    #[test]
+    fn open_tab_in_a_split() {
+        let (mut workspace, first, _, _) = two_panes();
+        let tab = workspace
+            .open_tab_in_split(first, Side::Left, viewer("c.jxl"))
+            .unwrap();
+        let new = workspace.pane_of_tab(tab).unwrap();
+        assert_eq!(workspace.layout().neighbor(first, Side::Left), Some(new));
+        assert_eq!(workspace.focused_pane(), new);
+    }
+
+    #[test]
+    fn move_missing_tab_fails() {
+        let (mut workspace, first, _, _) = two_panes();
+        assert!(workspace.move_tab(TabId(99), first, None).is_err());
+        assert!(
+            workspace
+                .move_tab_to_split(TabId(99), first, Side::Left)
+                .is_err()
+        );
+        assert_eq!(workspace.layout().pane_ids().len(), 2);
     }
 
     #[test]

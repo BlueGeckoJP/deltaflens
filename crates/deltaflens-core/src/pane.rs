@@ -54,6 +54,14 @@ impl Pane {
         Ok(())
     }
 
+    /// Inserts `tab` at `index` (or last, if `index` is past the end) and
+    /// activates it.
+    pub(crate) fn insert_tab(&mut self, index: usize, tab: Tab) {
+        let index = index.min(self.tabs.len());
+        self.tabs.insert(index, tab);
+        self.active = Some(index);
+    }
+
     /// Adds `tabs` after the last tab. The active tab stays; if there was none,
     /// the first added tab becomes active.
     pub(crate) fn append_tabs(&mut self, tabs: Vec<Tab>) {
@@ -259,6 +267,17 @@ mod tests {
         let mut pane = pane_with_tabs(2);
         assert!(pane.move_tab(TabId(9), 0).is_err());
         assert_eq!(tab_ids(&pane), vec![0, 1]);
+    }
+
+    #[test]
+    fn insert_tab_activates_it() {
+        let mut pane = pane_with_tabs(2);
+        pane.insert_tab(0, tab(5));
+        assert_eq!(tab_ids(&pane), vec![5, 0, 1]);
+        assert_eq!(active_id(&pane), Some(5));
+        pane.insert_tab(99, tab(6));
+        assert_eq!(tab_ids(&pane), vec![5, 0, 1, 6]);
+        assert_eq!(active_id(&pane), Some(6));
     }
 
     #[test]
