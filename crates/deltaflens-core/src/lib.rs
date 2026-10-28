@@ -2,6 +2,7 @@
 //!
 //! This crate must not depend on gpui.
 
+mod command;
 mod decode;
 mod explorer;
 mod folder;
@@ -16,6 +17,7 @@ mod test_util;
 mod view;
 mod workspace;
 
+pub use command::{PATH_PLACEHOLDER, external_command};
 pub use decode::{DecodedImage, decode, is_supported_image, thumbnail};
 pub use explorer::{Entry, EntryKind, Sort, SortKey, SortOrder, list_entries, sort_entries};
 pub use folder::{Direction, list_images, neighbor_image};
