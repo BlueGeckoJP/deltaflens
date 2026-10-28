@@ -1,0 +1,193 @@
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::SystemTime};
+
+use deltaflens_core::{LruCache, decode};
+use eyre::Result;
+use gpui::{AppContext as _, Context, EntityId, EventEmitter, RenderImage, SharedString, Task};
+
+use crate::render_image::to_render_image;
+
+/// How many bytes of decoded images to keep in memory. A 4K image takes about
+/// 33 MB.
+const CACHE_BYTES: usize = 1024 * 1024 * 1024;
+/// At most this many images are decoded ahead of time at once, so that the
+/// images asked for to be shown now are not kept waiting.
+const MAX_PARALLEL_PREFETCH: usize = 2;
+
+/// Identifies a decoded image.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ImageKey {
+    pub path: PathBuf,
+    /// Makes a changed file get decoded again.
+    pub modified: Option<SystemTime>,
+}
+
+impl ImageKey {
+    pub fn new(path: PathBuf) -> Self {
+        let modified = path
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok();
+        Self { path, modified }
+    }
+}
+
+/// What a viewer asks for: the image it shows now, and the images it may show
+/// next, the most likely first.
+#[derive(Debug, Default)]
+struct Request {
+    current: Option<ImageKey>,
+    prefetch: Vec<ImageKey>,
+}
+
+pub enum ImagesEvent {
+    /// The image of the key is decoded and can be taken with [`Images::get`].
+    Loaded(ImageKey),
+    /// The image of the key could not be decoded. [`Images::error`] tells why.
+    Failed(ImageKey),
+}
+
+/// Decodes images in the background for the viewers of a window and keeps the
+/// recently used ones in memory, so that moving between images does not wait
+/// for them to be decoded again.
+pub struct Images {
+    cache: LruCache<ImageKey, Arc<RenderImage>>,
+    /// By the viewer that asks.
+    requests: HashMap<EntityId, Request>,
+    /// Dropping a task cancels the decoding, unless it has started.
+    in_progress: HashMap<ImageKey, Task<()>>,
+    /// Not retried while still asked for.
+    failed: HashMap<ImageKey, SharedString>,
+}
+
+impl EventEmitter<ImagesEvent> for Images {}
+
+impl Images {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        cx.on_release(|this, cx| {
+            for (_, image) in this.cache.drain() {
+                cx.drop_image(image, None);
+            }
+        })
+        .detach();
+        Self {
+            cache: LruCache::new(CACHE_BYTES),
+            requests: HashMap::new(),
+            in_progress: HashMap::new(),
+            failed: HashMap::new(),
+        }
+    }
+
+    /// Returns the image if it is decoded, and marks it as recently used.
+    pub fn get(&mut self, key: &ImageKey) -> Option<Arc<RenderImage>> {
+        self.cache.get(key).cloned()
+    }
+
+    #[must_use]
+    pub fn contains(&self, key: &ImageKey) -> bool {
+        self.cache.contains(key)
+    }
+
+    /// Why the image could not be decoded, if it could not.
+    #[must_use]
+    pub fn error(&self, key: &ImageKey) -> Option<SharedString> {
+        self.failed.get(key).cloned()
+    }
+
+    /// Replaces what `viewer` asks for. Decoding images that nobody asks for
+    /// any longer is canceled.
+    pub fn request(
+        &mut self,
+        viewer: EntityId,
+        current: Option<ImageKey>,
+        prefetch: Vec<ImageKey>,
+        cx: &mut Context<Self>,
+    ) {
+        self.requests.insert(viewer, Request { current, prefetch });
+        self.schedule(cx);
+    }
+
+    /// Forgets what `viewer` asks for, as it is gone.
+    pub fn forget(&mut self, viewer: EntityId, cx: &mut Context<Self>) {
+        self.requests.remove(&viewer);
+        self.schedule(cx);
+    }
+
+    /// Cancels the decoding of images nobody asks for, and starts decoding the
+    /// ones asked for: all images to be shown now, then images to be shown
+    /// next, a few at a time.
+    fn schedule(&mut self, cx: &mut Context<Self>) {
+        let current: Vec<ImageKey> = self
+            .requests
+            .values()
+            .filter_map(|request| request.current.clone())
+            .collect();
+        let prefetch: Vec<ImageKey> = self
+            .requests
+            .values()
+            .flat_map(|request| request.prefetch.iter().cloned())
+            .filter(|key| !current.contains(key))
+            .collect();
+        let wanted = |key: &ImageKey| current.contains(key) || prefetch.contains(key);
+        self.in_progress.retain(|key, _| wanted(key));
+        self.failed.retain(|key, _| wanted(key));
+
+        for key in &current {
+            self.start(key, cx);
+        }
+        for key in &prefetch {
+            let prefetching = self
+                .in_progress
+                .keys()
+                .filter(|key| !current.contains(key))
+                .count();
+            if prefetching >= MAX_PARALLEL_PREFETCH {
+                break;
+            }
+            self.start(key, cx);
+        }
+    }
+
+    /// Starts decoding the image of `key`, unless it is decoded, being decoded,
+    /// or failed to decode.
+    fn start(&mut self, key: &ImageKey, cx: &mut Context<Self>) {
+        if self.cache.contains(key)
+            || self.in_progress.contains_key(key)
+            || self.failed.contains_key(key)
+        {
+            return;
+        }
+        let task = cx.spawn({
+            let key = key.clone();
+            async move |this, cx| {
+                let result = cx
+                    .background_spawn({
+                        let path = key.path.clone();
+                        async move { decode(&path).and_then(to_render_image) }
+                    })
+                    .await;
+                // Fails only if the images are gone.
+                let _ = this.update(cx, |this, cx| this.finish(key, result, cx));
+            }
+        });
+        self.in_progress.insert(key.clone(), task);
+    }
+
+    fn finish(&mut self, key: ImageKey, result: Result<Arc<RenderImage>>, cx: &mut Context<Self>) {
+        self.in_progress.remove(&key);
+        match result {
+            Ok(image) => {
+                let bytes = image.as_bytes(0).map_or(0, <[u8]>::len);
+                for (_, evicted) in self.cache.insert(key.clone(), image, bytes) {
+                    cx.drop_image(evicted, None);
+                }
+                cx.emit(ImagesEvent::Loaded(key));
+            }
+            Err(error) => {
+                tracing::warn!("{error:#}");
+                self.failed.insert(key.clone(), format!("{error:#}").into());
+                cx.emit(ImagesEvent::Failed(key));
+            }
+        }
+        self.schedule(cx);
+    }
+}

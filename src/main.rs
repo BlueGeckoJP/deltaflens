@@ -1,4 +1,5 @@
 mod explorer;
+mod images;
 mod render_image;
 mod thumbnails;
 mod viewer;

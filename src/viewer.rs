@@ -3,15 +3,14 @@ use std::{
     sync::Arc,
 };
 
-use deltaflens_core::{Direction, ViewTransform, decode, list_images, neighbor_image};
-use eyre::Result;
+use deltaflens_core::{Direction, ViewTransform, list_images, neighbor_image, prefetch_images};
 use gpui::{
-    Bounds, Context, CursorStyle, DispatchPhase, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, RenderImage, ScrollDelta, ScrollEvent, SharedString, Task, Window,
-    canvas, div, point, prelude::*, px, rgb, size,
+    App, Bounds, Context, CursorStyle, DispatchPhase, Entity, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, RenderImage, ScrollDelta, ScrollEvent, SharedString,
+    Task, Window, canvas, div, point, prelude::*, px, rgb, size,
 };
 
-use crate::render_image::to_render_image;
+use crate::images::{ImageKey, Images, ImagesEvent};
 
 /// How much one wheel notch zooms.
 const ZOOM_STEP: f32 = 1.2;
@@ -19,21 +18,27 @@ const ZOOM_STEP: f32 = 1.2;
 const LINES_PER_ZOOM_STEP: f32 = 3.0;
 /// How many pixels of precise (touchpad) scrolling count as one wheel notch.
 const PIXELS_PER_ZOOM_STEP: f32 = 50.0;
+/// How many images on each side of the current one to decode ahead of time.
+const PREFETCH_COUNT: usize = 2;
 
 /// Shows one image, fitted to the viewer or zoomed and panned by the user.
 pub struct Viewer {
-    path: PathBuf,
-    /// The image of `path`, or of the previous path while `path` is loading.
-    image: Option<Arc<RenderImage>>,
+    /// The image to show.
+    key: ImageKey,
+    /// Which way the user last moved in the folder, to decode the images that
+    /// way first.
+    direction: Direction,
+    images: Entity<Images>,
+    /// The image of `key`, or of the previous key while `key` is loading.
+    image: Option<(ImageKey, Arc<RenderImage>)>,
     error: Option<SharedString>,
     transform: ViewTransform,
     /// The bounds and scale factor of the last frame, used by input handlers.
     viewport: Option<(Bounds<Pixels>, f32)>,
     /// The last mouse position while panning.
     drag_position: Option<gpui::Point<Pixels>>,
-    /// Dropping it cancels the load, so that only the latest path is shown.
-    load_task: Option<Task<()>>,
-    /// The images in the folder of `path`, reused while moving within it.
+    /// The images in the folder of the current image, reused while moving
+    /// within it.
     folder: Option<Folder>,
     /// The folder being listed, if any.
     folder_task: Option<(PathBuf, Task<()>)>,
@@ -45,49 +50,108 @@ struct Folder {
 }
 
 impl Viewer {
-    pub fn new(path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        cx.on_release_in(window, |this, window, cx| {
-            if let Some(image) = this.image.take() {
-                cx.drop_image(image, Some(window));
-            }
+    pub fn new(
+        path: PathBuf,
+        images: Entity<Images>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let id = cx.entity_id();
+        cx.on_release_in(window, move |this, window, cx| {
+            this.images.update(cx, |images, cx| images.forget(id, cx));
+            this.release_image(window, cx);
+        })
+        .detach();
+        cx.subscribe_in(&images, window, |this, _, event, window, cx| {
+            this.on_images_event(event, window, cx);
         })
         .detach();
 
         let mut this = Self {
-            path: PathBuf::new(),
+            key: ImageKey {
+                path: PathBuf::new(),
+                modified: None,
+            },
+            direction: Direction::Next,
+            images,
             image: None,
             error: None,
             transform: ViewTransform::default(),
             viewport: None,
             drag_position: None,
-            load_task: None,
             folder: None,
             folder_task: None,
         };
-        this.load(path, window, cx);
+        this.load(path, Direction::Next, window, cx);
         this
     }
 
-    /// Decodes `path` in the background and shows it once done. The current
-    /// image stays visible until then.
-    pub fn load(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        self.path.clone_from(&path);
+    /// Shows `path`, reached by moving in `direction`. Unless it is decoded
+    /// already, the current image stays visible until it is.
+    pub fn load(
+        &mut self,
+        path: PathBuf,
+        direction: Direction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.key = ImageKey::new(path);
+        self.direction = direction;
         self.list_folder(cx);
-        self.load_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let result = cx
-                .background_spawn(async move { decode(&path).and_then(to_render_image) })
-                .await;
-            // Fails only if the viewer or the window is gone.
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.finish_load(result, window, cx);
-            });
-        }));
+        let key = self.key.clone();
+        let (image, error) = self
+            .images
+            .update(cx, |images, _| (images.get(&key), images.error(&key)));
+        if let Some(image) = image {
+            self.show(image, window, cx);
+        } else if let Some(error) = error {
+            self.show_error(error, window, cx);
+        }
+        self.request(cx);
     }
 
-    /// Lists the folder of `path` in the background, unless it is already
-    /// listed or being listed.
+    /// Asks for the current image and the images around it in the folder.
+    fn request(&self, cx: &mut Context<Self>) {
+        let prefetch = self.folder_images().map_or_default(|images| {
+            prefetch_images(images, &self.key.path, self.direction, PREFETCH_COUNT)
+                .into_iter()
+                .map(|path| ImageKey::new(path.to_path_buf()))
+                .collect()
+        });
+        let id = cx.entity_id();
+        let current = self.key.clone();
+        self.images.update(cx, |images, cx| {
+            images.request(id, Some(current), prefetch, cx);
+        });
+    }
+
+    fn on_images_event(
+        &mut self,
+        event: &ImagesEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ImagesEvent::Loaded(key) if *key == self.key => {
+                let image = self.images.update(cx, |images, _| images.get(key));
+                if let Some(image) = image {
+                    self.show(image, window, cx);
+                }
+            }
+            ImagesEvent::Failed(key) if *key == self.key => {
+                let error = self.images.read(cx).error(key);
+                if let Some(error) = error {
+                    self.show_error(error, window, cx);
+                }
+            }
+            ImagesEvent::Loaded(_) | ImagesEvent::Failed(_) => {}
+        }
+    }
+
+    /// Lists the folder of the current image in the background, unless it is
+    /// already listed or being listed.
     fn list_folder(&mut self, cx: &mut Context<Self>) {
-        let Some(dir) = self.path.parent() else {
+        let Some(dir) = self.key.path.parent() else {
             return;
         };
         let listed = self.folder.as_ref().is_some_and(|folder| folder.dir == dir);
@@ -108,10 +172,13 @@ impl Viewer {
                         async move { list_images(&dir) }
                     })
                     .await;
-                let _ = this.update(cx, |this, _| {
+                let _ = this.update(cx, |this, cx| {
                     this.folder_task = None;
                     match result {
-                        Ok(images) => this.folder = Some(Folder { dir, images }),
+                        Ok(images) => {
+                            this.folder = Some(Folder { dir, images });
+                            this.request(cx);
+                        }
                         Err(error) => tracing::warn!("{error:#}"),
                     }
                 });
@@ -123,34 +190,40 @@ impl Viewer {
     /// The image next to the current one in its folder, once the folder is
     /// listed.
     pub fn neighbor(&self, direction: Direction) -> Option<PathBuf> {
-        let folder = self.folder.as_ref()?;
-        if Some(folder.dir.as_path()) != self.path.parent() {
-            return None;
-        }
-        neighbor_image(&folder.images, &self.path, direction).map(Path::to_path_buf)
+        neighbor_image(self.folder_images()?, &self.key.path, direction).map(Path::to_path_buf)
     }
 
-    fn finish_load(
-        &mut self,
-        result: Result<Arc<RenderImage>>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(image) = self.image.take() {
-            cx.drop_image(image, Some(window));
-        }
-        match result {
-            Ok(image) => {
-                self.image = Some(image);
-                self.error = None;
-            }
-            Err(error) => {
-                tracing::warn!("{error:#}");
-                self.error = Some(format!("{error:#}").into());
-            }
-        }
+    /// The images in the folder of the current image, once it is listed.
+    fn folder_images(&self) -> Option<&[PathBuf]> {
+        self.folder
+            .as_ref()
+            .filter(|folder| Some(folder.dir.as_path()) == self.key.path.parent())
+            .map(|folder| folder.images.as_slice())
+    }
+
+    fn show(&mut self, image: Arc<RenderImage>, window: &mut Window, cx: &mut Context<Self>) {
+        self.release_image(window, cx);
+        self.image = Some((self.key.clone(), image));
+        self.error = None;
         self.transform.reset();
         cx.notify();
+    }
+
+    fn show_error(&mut self, error: SharedString, window: &mut Window, cx: &mut Context<Self>) {
+        self.release_image(window, cx);
+        self.error = Some(error);
+        self.transform.reset();
+        cx.notify();
+    }
+
+    /// Stops showing the image. Its texture is freed unless the image is still
+    /// kept in memory to be shown again.
+    fn release_image(&mut self, window: &mut Window, cx: &mut App) {
+        if let Some((key, image)) = self.image.take()
+            && !self.images.read(cx).contains(&key)
+        {
+            cx.drop_image(image, Some(window));
+        }
     }
 
     pub fn reset_view(&mut self, cx: &mut Context<Self>) {
@@ -160,7 +233,7 @@ impl Viewer {
 
     /// The image and viewport sizes in logical pixels, if both are known.
     fn sizes(&self) -> Option<(deltaflens_core::Size, deltaflens_core::Size)> {
-        let image = self.image.as_ref()?;
+        let (_, image) = self.image.as_ref()?;
         let (bounds, scale_factor) = self.viewport?;
         Some((image_size(image, scale_factor), to_core_size(bounds.size)))
     }
@@ -205,7 +278,7 @@ impl Viewer {
     }
 
     fn paint(&self, bounds: Bounds<Pixels>, window: &mut Window) {
-        let Some(image) = &self.image else {
+        let Some((_, image)) = &self.image else {
             return;
         };
         let rect = self.transform.image_rect(
@@ -224,7 +297,7 @@ impl Viewer {
             0,
             false,
         ) {
-            tracing::error!("failed to paint {}: {error:#}", self.path.display());
+            tracing::error!("failed to paint {}: {error:#}", self.key.path.display());
         }
     }
 }

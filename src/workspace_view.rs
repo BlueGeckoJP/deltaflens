@@ -17,6 +17,7 @@ use gpui::{
 
 use crate::{
     explorer::{DraggedImage, Explorer, ExplorerEvent},
+    images::Images,
     thumbnails::Thumbnails,
     viewer::Viewer,
     window_frame::{self, ROUNDING},
@@ -162,6 +163,7 @@ pub struct WorkspaceView {
     workspace: Workspace,
     views: HashMap<TabId, TabView>,
     thumbnails: Entity<Thumbnails>,
+    images: Entity<Images>,
     focus_handle: FocusHandle,
     /// The window title last set, to avoid setting it on every frame.
     title: String,
@@ -182,6 +184,7 @@ impl WorkspaceView {
             workspace: Workspace::new(),
             views: HashMap::new(),
             thumbnails: cx.new(Thumbnails::new),
+            images: cx.new(Images::new),
             focus_handle,
             title: APP_NAME.to_owned(),
             move_pending: false,
@@ -241,7 +244,8 @@ impl WorkspaceView {
     ) -> TabView {
         match content {
             TabContent::Viewer { path } => {
-                TabView::Viewer(cx.new(|cx| Viewer::new(path, window, cx)))
+                let images = self.images.clone();
+                TabView::Viewer(cx.new(|cx| Viewer::new(path, images, window, cx)))
             }
             TabContent::Explorer { dir } => {
                 let thumbnails = self.thumbnails.clone();
@@ -296,7 +300,7 @@ impl WorkspaceView {
     fn open_in_active_tab(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         match self.active_tab().map(Tab::id) {
             Some(tab_id) if matches!(self.views.get(&tab_id), Some(TabView::Viewer(_))) => {
-                if let Err(error) = self.show_in_viewer(tab_id, path, window, cx) {
+                if let Err(error) = self.show_in_viewer(tab_id, path, Direction::Next, window, cx) {
                     tracing::error!("{error:#}");
                 }
             }
@@ -304,11 +308,12 @@ impl WorkspaceView {
         }
     }
 
-    /// Shows `path` in a viewer tab.
+    /// Shows `path` in a viewer tab, reached by moving in `direction`.
     fn show_in_viewer(
         &mut self,
         tab_id: TabId,
         path: PathBuf,
+        direction: Direction,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
@@ -317,7 +322,7 @@ impl WorkspaceView {
         };
         let viewer = viewer.clone();
         self.set_tab_content(tab_id, TabContent::Viewer { path: path.clone() })?;
-        viewer.update(cx, |viewer, cx| viewer.load(path, window, cx));
+        viewer.update(cx, |viewer, cx| viewer.load(path, direction, window, cx));
         cx.notify();
         Ok(())
     }
@@ -383,7 +388,7 @@ impl WorkspaceView {
         else {
             return;
         };
-        if let Err(error) = self.show_in_viewer(tab_id, path, window, cx) {
+        if let Err(error) = self.show_in_viewer(tab_id, path, direction, window, cx) {
             tracing::error!("{error:#}");
         }
     }

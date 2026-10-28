@@ -62,6 +62,41 @@ pub fn neighbor_image<'a>(
     Some(&images[next % images.len()])
 }
 
+/// Returns the images to decode ahead of time around `current`, the most
+/// likely to be shown next first: up to `count` images in `direction`, then up
+/// to `count` images the other way. `images` must be sorted by
+/// [`list_images`]. Wraps around at both ends like [`neighbor_image`].
+///
+/// Neither `current` nor any image is returned twice, so a small folder gives
+/// fewer images.
+#[must_use]
+pub fn prefetch_images<'a>(
+    images: &'a [PathBuf],
+    current: &Path,
+    direction: Direction,
+    count: usize,
+) -> Vec<&'a Path> {
+    let opposite = match direction {
+        Direction::Previous => Direction::Next,
+        Direction::Next => Direction::Previous,
+    };
+    let mut prefetch: Vec<&Path> = Vec::new();
+    for direction in [direction, opposite] {
+        let mut from = current;
+        for _ in 0..count {
+            let Some(image) = neighbor_image(images, from, direction) else {
+                break;
+            };
+            if image == current || prefetch.contains(&image) {
+                break;
+            }
+            prefetch.push(image);
+            from = image;
+        }
+    }
+    prefetch
+}
+
 /// Natural, case-insensitive order of file names. Ties are broken so that the
 /// order is total.
 pub(crate) fn compare_names(a: &Path, b: &Path) -> Ordering {
@@ -200,5 +235,71 @@ mod tests {
     #[test]
     fn neighbor_in_empty_list_is_none() {
         assert_eq!(neighbor(&[], "a.png", Direction::Next), None);
+    }
+
+    fn prefetch(images: &[PathBuf], current: &str, direction: Direction) -> Vec<String> {
+        prefetch_images(images, &Path::new("/d").join(current), direction, 2)
+            .into_iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn prefetch_puts_the_direction_of_travel_first() {
+        let images = paths(&["a.png", "b.png", "c.png", "d.png", "e.png", "f.png"]);
+        assert_eq!(
+            prefetch(&images, "c.png", Direction::Next),
+            ["d.png", "e.png", "b.png", "a.png"]
+        );
+        assert_eq!(
+            prefetch(&images, "c.png", Direction::Previous),
+            ["b.png", "a.png", "d.png", "e.png"]
+        );
+    }
+
+    #[test]
+    fn prefetch_wraps_around_at_the_ends() {
+        let images = paths(&["a.png", "b.png", "c.png", "d.png", "e.png", "f.png"]);
+        assert_eq!(
+            prefetch(&images, "f.png", Direction::Next),
+            ["a.png", "b.png", "e.png", "d.png"]
+        );
+        assert_eq!(
+            prefetch(&images, "a.png", Direction::Next),
+            ["b.png", "c.png", "f.png", "e.png"]
+        );
+    }
+
+    #[test]
+    fn prefetch_in_small_folder_gives_each_image_once() {
+        let images = paths(&["a.png", "b.png", "c.png"]);
+        assert_eq!(
+            prefetch(&images, "a.png", Direction::Next),
+            ["b.png", "c.png"]
+        );
+        let images = paths(&["a.png", "b.png"]);
+        assert_eq!(prefetch(&images, "a.png", Direction::Previous), ["b.png"]);
+    }
+
+    #[test]
+    fn prefetch_in_folder_of_one_image_is_empty() {
+        let images = paths(&["a.png"]);
+        assert_eq!(
+            prefetch(&images, "a.png", Direction::Next),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn prefetch_of_missing_image_uses_its_position() {
+        let images = paths(&["a.png", "c.png", "e.png"]);
+        assert_eq!(
+            prefetch(&images, "d.png", Direction::Next),
+            ["e.png", "a.png", "c.png"]
+        );
+        assert_eq!(
+            prefetch(&[], "a.png", Direction::Next),
+            Vec::<String>::new()
+        );
     }
 }
