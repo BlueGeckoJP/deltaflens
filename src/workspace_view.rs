@@ -38,6 +38,10 @@ actions!(
         FocusPaneRight,
         FocusPaneUp,
         FocusPaneDown,
+        SwapPaneLeft,
+        SwapPaneRight,
+        SwapPaneUp,
+        SwapPaneDown,
     ]
 );
 
@@ -465,6 +469,28 @@ impl WorkspaceView {
 
     fn focus_pane_down(&mut self, _: &FocusPaneDown, _: &mut Window, cx: &mut Context<Self>) {
         self.focus_neighbor(Side::Down, cx);
+    }
+
+    fn swap_with_neighbor(&mut self, side: Side, cx: &mut Context<Self>) {
+        if self.workspace.swap_with_neighbor(side) {
+            cx.notify();
+        }
+    }
+
+    fn swap_pane_left(&mut self, _: &SwapPaneLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.swap_with_neighbor(Side::Left, cx);
+    }
+
+    fn swap_pane_right(&mut self, _: &SwapPaneRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.swap_with_neighbor(Side::Right, cx);
+    }
+
+    fn swap_pane_up(&mut self, _: &SwapPaneUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.swap_with_neighbor(Side::Up, cx);
+    }
+
+    fn swap_pane_down(&mut self, _: &SwapPaneDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.swap_with_neighbor(Side::Down, cx);
     }
 
     fn focus_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
@@ -964,6 +990,10 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::focus_pane_right))
             .on_action(cx.listener(Self::focus_pane_up))
             .on_action(cx.listener(Self::focus_pane_down))
+            .on_action(cx.listener(Self::swap_pane_left))
+            .on_action(cx.listener(Self::swap_pane_right))
+            .on_action(cx.listener(Self::swap_pane_up))
+            .on_action(cx.listener(Self::swap_pane_down))
             .child(self.render_layout(self.workspace.layout(), &[], &title_bar, window, cx))
             .when_some(self.tab_menu.as_ref(), |this, menu| {
                 this.child(

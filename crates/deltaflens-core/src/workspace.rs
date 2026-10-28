@@ -137,6 +137,41 @@ impl Workspace {
         self.layout.equalize(path)
     }
 
+    /// Swaps the tabs of two panes. The panes stay where they are in the
+    /// layout, with their sizes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if either pane does not exist.
+    pub fn swap_panes(&mut self, a: PaneId, b: PaneId) -> Result<()> {
+        if a == b {
+            return self.pane(a).map(|_| ());
+        }
+        let pane_a = self.panes.remove(&a).ok_or_else(|| missing_pane(a))?;
+        let Some(pane_b) = self.panes.remove(&b) else {
+            self.panes.insert(a, pane_a);
+            return Err(missing_pane(b));
+        };
+        self.panes.insert(a, pane_b);
+        self.panes.insert(b, pane_a);
+        Ok(())
+    }
+
+    /// Swaps the tabs of the focused pane with those of its neighbor on `side`,
+    /// and focuses the neighbor, which now has the tabs that were focused.
+    /// Returns whether there was a neighbor.
+    pub fn swap_with_neighbor(&mut self, side: Side) -> bool {
+        let focused = self.focused_pane;
+        let Some(neighbor) = self.layout.neighbor(focused, side) else {
+            return false;
+        };
+        if self.swap_panes(focused, neighbor).is_err() {
+            return false;
+        }
+        self.focused_pane = neighbor;
+        true
+    }
+
     /// Focuses the pane next to the focused pane on `side`. Returns whether
     /// there was one.
     pub fn focus_neighbor(&mut self, side: Side) -> bool {
@@ -319,6 +354,72 @@ mod tests {
         let mut workspace = Workspace::new();
         let first = workspace.focused_pane();
         assert!(workspace.close_tab(first, TabId(99)).is_err());
+    }
+
+    #[test]
+    fn swap_with_neighbor_in_the_same_split() {
+        let mut workspace = Workspace::new();
+        let first = workspace.focused_pane();
+        workspace.open_tab(first, viewer("a.jxl")).unwrap();
+        let second = workspace.split_pane(first, Axis::Horizontal).unwrap();
+        workspace.open_tab(second, viewer("b.jxl")).unwrap();
+        let layout = workspace.layout().clone();
+
+        assert!(workspace.swap_with_neighbor(Side::Left));
+
+        assert_eq!(workspace.layout(), &layout);
+        assert_eq!(
+            contents(&workspace, first),
+            [viewer("a.jxl"), viewer("b.jxl")]
+        );
+        assert_eq!(contents(&workspace, second), [viewer("a.jxl")]);
+        assert_eq!(workspace.focused_pane(), first);
+    }
+
+    #[test]
+    fn swap_with_neighbor_across_splits() {
+        // first | (second / third), swapping third with first.
+        let mut workspace = Workspace::new();
+        let first = workspace.focused_pane();
+        workspace.open_tab(first, viewer("a.jxl")).unwrap();
+        let second = workspace.split_pane(first, Axis::Horizontal).unwrap();
+        let third = workspace.split_pane(second, Axis::Vertical).unwrap();
+        workspace.open_tab(third, viewer("c.jxl")).unwrap();
+
+        assert!(workspace.swap_with_neighbor(Side::Left));
+
+        assert_eq!(
+            contents(&workspace, first),
+            [viewer("a.jxl"), viewer("c.jxl")]
+        );
+        assert_eq!(contents(&workspace, third), [viewer("a.jxl")]);
+        assert_eq!(contents(&workspace, second), [viewer("a.jxl")]);
+        assert_eq!(workspace.focused_pane(), first);
+    }
+
+    #[test]
+    fn swap_without_neighbor_changes_nothing() {
+        let mut workspace = Workspace::new();
+        let first = workspace.focused_pane();
+        workspace.open_tab(first, viewer("a.jxl")).unwrap();
+        let second = workspace.split_pane(first, Axis::Horizontal).unwrap();
+
+        assert!(!workspace.swap_with_neighbor(Side::Right));
+        assert!(!workspace.swap_with_neighbor(Side::Up));
+
+        assert_eq!(contents(&workspace, first), [viewer("a.jxl")]);
+        assert_eq!(contents(&workspace, second), [viewer("a.jxl")]);
+        assert_eq!(workspace.focused_pane(), second);
+    }
+
+    #[test]
+    fn swap_missing_pane_fails_without_change() {
+        let mut workspace = Workspace::new();
+        let first = workspace.focused_pane();
+        workspace.open_tab(first, viewer("a.jxl")).unwrap();
+        assert!(workspace.swap_panes(first, PaneId(99)).is_err());
+        assert!(workspace.swap_panes(PaneId(99), first).is_err());
+        assert_eq!(contents(&workspace, first), [viewer("a.jxl")]);
     }
 
     #[test]
