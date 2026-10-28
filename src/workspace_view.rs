@@ -6,14 +6,16 @@ use std::{
 use deltaflens_core::{Axis, Direction, Layout, PaneId, Tab, TabContent, TabId, Workspace};
 use eyre::{Result, eyre};
 use gpui::{
-    AnyElement, ClickEvent, Context, ElementId, Entity, FocusHandle, MouseButton, MouseUpEvent,
-    PathPromptOptions, Window, actions, div, prelude::*, px, relative, rgb,
+    AnyElement, ClickEvent, Context, ElementId, Entity, FocusHandle, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Window, actions, div, prelude::*, px,
+    relative, rgb,
 };
 
 use crate::{
     explorer::{Explorer, ExplorerEvent},
     thumbnails::Thumbnails,
     viewer::Viewer,
+    window_frame::{self, ROUNDING},
 };
 
 actions!(
@@ -34,6 +36,24 @@ actions!(
 );
 
 pub const APP_NAME: &str = "deltaflens";
+
+/// The height of a tab bar, which is also the title bar of the window.
+const TAB_BAR_HEIGHT: Pixels = px(36.);
+/// The width of the empty part of a tab bar kept for moving the window, even
+/// when the tabs fill the bar.
+const MIN_DRAG_WIDTH: Pixels = px(48.);
+
+/// What the tab bar of a pane at the top edge of the window does as part of
+/// the title bar, when the app draws the window frame. Its empty part moves
+/// the window.
+#[derive(Clone, Copy)]
+struct TitleBarPart {
+    /// The window buttons are at the right end. True for the pane at the top
+    /// right corner.
+    controls: bool,
+    round_top_left: bool,
+    round_top_right: bool,
+}
 
 /// The UI state of a tab.
 enum TabView {
@@ -59,6 +79,10 @@ pub struct WorkspaceView {
     focus_handle: FocusHandle,
     /// The window title last set, to avoid setting it on every frame.
     title: String,
+    /// The mouse was pressed on the empty part of a tab bar. The window starts
+    /// moving when the mouse moves, so that a double click still reaches the
+    /// tab bar.
+    move_pending: bool,
 }
 
 impl WorkspaceView {
@@ -71,6 +95,7 @@ impl WorkspaceView {
             thumbnails: cx.new(Thumbnails::new),
             focus_handle,
             title: APP_NAME.to_owned(),
+            move_pending: false,
         }
     }
 
@@ -374,15 +399,48 @@ impl WorkspaceView {
         }
     }
 
-    fn render_layout(&self, layout: &Layout, cx: &mut Context<Self>) -> AnyElement {
+    /// The part each pane at the top of the window takes in the title bar, or
+    /// nothing when the compositor draws the frame.
+    fn title_bar_parts(&self, window: &Window) -> HashMap<PaneId, TitleBarPart> {
+        let Some(tiling) = window_frame::client_tiling(window) else {
+            return HashMap::new();
+        };
+        let layout = self.workspace.layout();
+        let top = layout.top_pane_ids();
+        let top_left = top.first().copied();
+        let top_right = layout.top_right_pane_id();
+        top.into_iter()
+            .map(|pane_id| {
+                let part = TitleBarPart {
+                    controls: Some(pane_id) == top_right,
+                    round_top_left: Some(pane_id) == top_left && !tiling.top && !tiling.left,
+                    round_top_right: Some(pane_id) == top_right && !tiling.top && !tiling.right,
+                };
+                (pane_id, part)
+            })
+            .collect()
+    }
+
+    fn render_layout(
+        &self,
+        layout: &Layout,
+        title_bar: &HashMap<PaneId, TitleBarPart>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         match layout {
-            Layout::Pane(pane_id) => self.render_pane(*pane_id, cx),
+            Layout::Pane(pane_id) => {
+                let part = title_bar.get(pane_id).copied();
+                self.render_pane(*pane_id, part, window, cx)
+            }
             Layout::Split { axis, children } => div()
                 .size_full()
                 .flex()
                 .when(*axis == Axis::Vertical, Styled::flex_col)
                 .children(children.iter().map(|(child, ratio)| {
-                    let cell = div().overflow_hidden().child(self.render_layout(child, cx));
+                    let cell = div()
+                        .overflow_hidden()
+                        .child(self.render_layout(child, title_bar, window, cx));
                     match axis {
                         Axis::Horizontal => cell.h_full().w(relative(*ratio)),
                         Axis::Vertical => cell.w_full().h(relative(*ratio)),
@@ -392,7 +450,13 @@ impl WorkspaceView {
         }
     }
 
-    fn render_pane(&self, pane_id: PaneId, cx: &mut Context<Self>) -> AnyElement {
+    fn render_pane(
+        &self,
+        pane_id: PaneId,
+        title_bar: Option<TitleBarPart>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Ok(pane) = self.workspace.pane(pane_id) else {
             return div().into_any_element();
         };
@@ -412,8 +476,17 @@ impl WorkspaceView {
             .size_full()
             .flex()
             .flex_col()
-            .when(!pane.tabs().is_empty(), |this| {
-                this.child(Self::render_tab_bar(pane_id, pane.tabs(), active, cx))
+            // A pane at the top keeps its tab bar without tabs, to move the
+            // window with.
+            .when(!pane.tabs().is_empty() || title_bar.is_some(), |this| {
+                this.child(Self::render_tab_bar(
+                    pane_id,
+                    pane.tabs(),
+                    active,
+                    title_bar,
+                    window,
+                    cx,
+                ))
             })
             .child(div().flex_1().overflow_hidden().child(content))
             .into_any_element()
@@ -423,22 +496,26 @@ impl WorkspaceView {
         pane_id: PaneId,
         tabs: &[Tab],
         active: Option<TabId>,
+        title_bar: Option<TitleBarPart>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        div()
-            .id(ElementId::Name(format!("tab-bar-{pane_id:?}").into()))
+        let round_top_left = title_bar.is_some_and(|part| part.round_top_left);
+        let round_top_right = title_bar.is_some_and(|part| part.round_top_right);
+        let tabs = div()
+            .id(ElementId::Name(format!("tabs-{pane_id:?}").into()))
             .flex()
-            .flex_shrink_0()
-            .w_full()
-            .h(px(32.))
+            .min_w_0()
+            .h_full()
             .overflow_x_scroll()
-            .bg(rgb(0x14_14_14))
-            .text_sm()
             .children(tabs.iter().enumerate().map(|(index, tab)| {
                 let tab_id = tab.id();
                 let is_active = active == Some(tab_id);
                 div()
                     .id(("tab", index))
+                    .when(index == 0 && round_top_left, |this| {
+                        this.rounded_tl(ROUNDING)
+                    })
                     .flex()
                     .flex_shrink_0()
                     .items_center()
@@ -474,7 +551,65 @@ impl WorkspaceView {
                                 this.close_tab(pane_id, tab_id, cx);
                             })),
                     )
+            }));
+        div()
+            .flex()
+            .flex_shrink_0()
+            .w_full()
+            .h(TAB_BAR_HEIGHT)
+            .bg(rgb(0x14_14_14))
+            .text_sm()
+            .when(round_top_left, |this| this.rounded_tl(ROUNDING))
+            .when(round_top_right, |this| this.rounded_tr(ROUNDING))
+            .child(tabs)
+            .when_some(title_bar, |this, part| {
+                this.child(Self::render_drag_area(pane_id, window, cx))
+                    .when(part.controls, |this| {
+                        this.child(window_frame::window_controls(window, round_top_right))
+                    })
+            })
+    }
+
+    /// The empty part of a tab bar at the top of the window, which works as a
+    /// title bar.
+    fn render_drag_area(pane_id: PaneId, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let controls = window.window_controls();
+        div()
+            .id(ElementId::Name(format!("drag-area-{pane_id:?}").into()))
+            .flex_1()
+            .flex_shrink_0()
+            .min_w(MIN_DRAG_WIDTH)
+            .h_full()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _, _| this.move_pending = true),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, _| this.move_pending = false),
+            )
+            .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, _| {
+                this.move_pending = false;
             }))
+            .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, window, _| {
+                if this.move_pending {
+                    this.move_pending = false;
+                    window.start_window_move();
+                }
+            }))
+            .when(controls.maximize, |this| {
+                this.on_click(|event, window, _| {
+                    if event.click_count() == 2 {
+                        window.zoom_window();
+                    }
+                })
+            })
+            .when(controls.window_menu, |this| {
+                this.on_mouse_down(MouseButton::Right, |event, window, _| {
+                    window.show_window_menu(event.position);
+                })
+            })
+            .into_any_element()
     }
 }
 
@@ -493,9 +628,9 @@ fn tab_name(tab: &Tab) -> String {
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.update_title(window);
-        div()
+        let title_bar = self.title_bar_parts(window);
+        let content = div()
             .size_full()
-            .bg(rgb(0x1e_1e_1e))
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::open))
             .on_action(cx.listener(Self::new_tab))
@@ -508,7 +643,8 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::go_back))
             .on_action(cx.listener(Self::go_forward))
             .on_action(cx.listener(Self::go_up))
-            .child(self.render_layout(self.workspace.layout(), cx))
+            .child(self.render_layout(self.workspace.layout(), &title_bar, window, cx));
+        window_frame::window_frame(content, window)
     }
 }
 
