@@ -1,3 +1,4 @@
+mod encode;
 mod jxl;
 mod thumbnail;
 mod thumbnail_cache;
@@ -7,6 +8,7 @@ use std::path::Path;
 use eyre::{Result, WrapErr};
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
 
+pub(crate) use self::encode::encode_png;
 pub use self::{thumbnail::thumbnail, thumbnail_cache::ThumbnailCache};
 
 /// A decoded image with 8-bit BGRA pixels, the layout gpui's `RenderImage`

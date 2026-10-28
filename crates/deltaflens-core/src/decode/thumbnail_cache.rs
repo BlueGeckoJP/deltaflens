@@ -17,7 +17,7 @@ use std::{
 use eyre::{Result, WrapErr, bail};
 use md5::{Digest, Md5};
 
-use super::{DecodedImage, thumbnail};
+use super::{DecodedImage, encode::encode_png, thumbnail};
 
 /// The size directories, smallest first, with the longest side of their
 /// thumbnails.
@@ -256,21 +256,18 @@ fn write_png(path: &Path, image: &DecodedImage, source: &Source) -> Result<()> {
         .truncate(true)
         .mode(0o600)
         .open(path)?;
-    let mut encoder = png::Encoder::new(BufWriter::new(file), image.width, image.height);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    encoder.add_text_chunk(URI_KEY.to_owned(), source.uri.clone())?;
-    encoder.add_text_chunk(MTIME_KEY.to_owned(), source.mtime.to_string())?;
-    encoder.add_text_chunk(SIZE_KEY.to_owned(), source.size.to_string())?;
-    encoder.add_text_chunk("Software".to_owned(), "deltaflens".to_owned())?;
-    let mut writer = encoder.write_header()?;
-    let mut rgba = image.pixels.clone();
-    for pixel in rgba.as_chunks_mut::<4>().0 {
-        pixel.swap(0, 2);
-    }
-    writer.write_image_data(&rgba)?;
-    writer.finish()?;
-    Ok(())
+    let text = [
+        (URI_KEY, source.uri.clone()),
+        (MTIME_KEY, source.mtime.to_string()),
+        (SIZE_KEY, source.size.to_string()),
+        ("Software", "deltaflens".to_owned()),
+    ];
+    encode_png(
+        BufWriter::new(file),
+        image,
+        &text,
+        png::Compression::Balanced,
+    )
 }
 
 #[cfg(test)]

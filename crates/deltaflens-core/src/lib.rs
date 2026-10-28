@@ -2,6 +2,7 @@
 //!
 //! This crate must not depend on gpui.
 
+mod clipboard;
 mod command;
 mod decode;
 mod explorer;
@@ -17,6 +18,7 @@ mod test_util;
 mod view;
 mod workspace;
 
+pub use clipboard::{clipboard_command, png_for_clipboard, run_with_input};
 pub use command::{PATH_PLACEHOLDER, external_command};
 pub use decode::{DecodedImage, ThumbnailCache, decode, is_supported_image, thumbnail};
 pub use explorer::{Entry, EntryKind, Sort, SortKey, SortOrder, list_entries, sort_entries};

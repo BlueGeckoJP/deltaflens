@@ -5,9 +5,10 @@ use std::{
 };
 
 use deltaflens_core::{
-    Entry, EntryKind, History, Sort, SortKey, SortOrder, external_command, list_entries,
-    sort_entries,
+    Entry, EntryKind, History, Sort, SortKey, SortOrder, clipboard_command, external_command,
+    list_entries, png_for_clipboard, run_with_input, sort_entries,
 };
+use eyre::eyre;
 use gpui::{
     AnyElement, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, MouseButton,
     MouseDownEvent, NavigationDirection, ObjectFit, Pixels, Point, ScrollStrategy, SharedString,
@@ -54,6 +55,7 @@ pub struct Explorer {
 /// The menu shown by right-clicking an entry.
 struct ContextMenu {
     path: PathBuf,
+    kind: EntryKind,
     /// In window coordinates.
     position: Point<Pixels>,
 }
@@ -200,6 +202,34 @@ impl Explorer {
         cx.notify();
     }
 
+    /// Copies the image to the clipboard in the background, with wl-copy or
+    /// xclip.
+    fn copy_image(&mut self, path: &Path, cx: &mut Context<Self>) {
+        self.context_menu = None;
+        let path = path.to_owned();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let png = png_for_clipboard(&path)?;
+                    let command = clipboard_command(|name| std::env::var_os(name))
+                        .ok_or_else(|| eyre!("no Wayland or X11 display"))?;
+                    run_with_input(command, &png)
+                })
+                .await;
+            // Fails only if the explorer is gone.
+            let _ = this.update(cx, |this, cx| {
+                this.notice = result.err().map(|error| {
+                    let message = format!("Failed to copy the image: {error:#}");
+                    tracing::error!("{message}");
+                    message.into()
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn render_context_menu(menu: &ContextMenu, cx: &mut Context<Self>) -> impl IntoElement {
         let program = OPEN_COMMAND.split_whitespace().next().unwrap_or_default();
         let item = |id: &'static str, label: String| {
@@ -213,6 +243,7 @@ impl Explorer {
         };
         let open_path = menu.path.clone();
         let copy_path = menu.path.clone();
+        let image_path = menu.path.clone();
         div()
             .flex()
             .flex_col()
@@ -234,6 +265,15 @@ impl Explorer {
                     move |this, _: &ClickEvent, _, cx| this.open_externally(&open_path, cx),
                 )),
             )
+            .when(menu.kind == EntryKind::Image, |this| {
+                this.child(
+                    item("copy-image", "Copy image".to_owned()).on_click(cx.listener(
+                        move |this, _: &ClickEvent, _, cx| {
+                            this.copy_image(&image_path, cx);
+                        },
+                    )),
+                )
+            })
             .child(item("copy-path", "Copy path".to_owned()).on_click(
                 cx.listener(move |this, _: &ClickEvent, _, cx| this.copy_path(&copy_path, cx)),
             ))
@@ -496,9 +536,11 @@ impl Explorer {
             }))
             .on_mouse_down(MouseButton::Right, {
                 let path = entry.path.clone();
+                let kind = entry.kind;
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                     this.context_menu = Some(ContextMenu {
                         path: path.clone(),
+                        kind,
                         position: event.position,
                     });
                     cx.notify();
