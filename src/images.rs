@@ -1,4 +1,9 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::SystemTime};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+    time::SystemTime,
+};
 
 use deltaflens_core::{LruCache, decode};
 use eyre::Result;
@@ -57,6 +62,10 @@ pub struct Images {
     in_progress: HashMap<ImageKey, Task<()>>,
     /// Not retried while still asked for.
     failed: HashMap<ImageKey, SharedString>,
+    /// Decoded ahead of time, and not again while still asked for ahead of
+    /// time, even if evicted. Otherwise images that do not all fit in the
+    /// cache would evict one another and be decoded over and over.
+    prefetched: HashSet<ImageKey>,
 }
 
 impl EventEmitter<ImagesEvent> for Images {}
@@ -74,6 +83,7 @@ impl Images {
             requests: HashMap::new(),
             in_progress: HashMap::new(),
             failed: HashMap::new(),
+            prefetched: HashSet::new(),
         }
     }
 
@@ -130,11 +140,15 @@ impl Images {
         let wanted = |key: &ImageKey| current.contains(key) || prefetch.contains(key);
         self.in_progress.retain(|key, _| wanted(key));
         self.failed.retain(|key, _| wanted(key));
+        self.prefetched.retain(|key| prefetch.contains(key));
 
         for key in &current {
             self.start(key, cx);
         }
         for key in &prefetch {
+            if self.prefetched.contains(key) {
+                continue;
+            }
             let prefetching = self
                 .in_progress
                 .keys()
@@ -176,6 +190,8 @@ impl Images {
         self.in_progress.remove(&key);
         match result {
             Ok(image) => {
+                // Forgotten by `schedule` unless it is asked for ahead of time.
+                self.prefetched.insert(key.clone());
                 let bytes = image.as_bytes(0).map_or(0, <[u8]>::len);
                 for (_, evicted) in self.cache.insert(key.clone(), image, bytes) {
                     cx.drop_image(evicted, None);
