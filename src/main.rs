@@ -2,6 +2,7 @@ mod explorer;
 mod render_image;
 mod thumbnails;
 mod viewer;
+mod window_frame;
 mod workspace_view;
 
 use std::path::PathBuf;
@@ -9,8 +10,8 @@ use std::path::PathBuf;
 use clap::Parser;
 use eyre::Result;
 use gpui::{
-    App, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, actions, prelude::*, px,
-    size,
+    App, Bounds, KeyBinding, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
+    WindowDecorations, WindowOptions, actions, prelude::*, px, size,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -70,6 +71,12 @@ fn main() -> Result<()> {
                 size(px(1280.), px(800.)),
                 cx,
             ))),
+            // Draw the frame in the app, so that the tab bars at the top work as
+            // the title bar. The compositor may still draw it instead.
+            window_decorations: Some(WindowDecorations::Client),
+            // The margin around the window that holds the shadow must be
+            // see-through. On X11 an opaque window paints it black.
+            window_background: WindowBackgroundAppearance::Transparent,
             ..Default::default()
         };
         let result = cx.open_window(options, |window, cx| {

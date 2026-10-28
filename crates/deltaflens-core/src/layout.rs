@@ -91,6 +91,55 @@ impl Layout {
             }
         }
     }
+
+    /// Returns the IDs of the panes that touch the top edge of the layout, from
+    /// left to right.
+    #[must_use]
+    pub fn top_pane_ids(&self) -> Vec<PaneId> {
+        let mut ids = Vec::new();
+        self.collect_top_pane_ids(&mut ids);
+        ids
+    }
+
+    fn collect_top_pane_ids(&self, ids: &mut Vec<PaneId>) {
+        match self {
+            Layout::Pane(id) => ids.push(*id),
+            Layout::Split {
+                axis: Axis::Horizontal,
+                children,
+            } => {
+                for (child, _) in children {
+                    child.collect_top_pane_ids(ids);
+                }
+            }
+            Layout::Split {
+                axis: Axis::Vertical,
+                children,
+            } => {
+                if let Some((first, _)) = children.first() {
+                    first.collect_top_pane_ids(ids);
+                }
+            }
+        }
+    }
+
+    /// Returns the ID of the pane at the top right corner of the layout.
+    ///
+    /// Returns `None` only for a split without children.
+    #[must_use]
+    pub fn top_right_pane_id(&self) -> Option<PaneId> {
+        match self {
+            Layout::Pane(id) => Some(*id),
+            Layout::Split {
+                axis: Axis::Horizontal,
+                children,
+            } => children.last()?.0.top_right_pane_id(),
+            Layout::Split {
+                axis: Axis::Vertical,
+                children,
+            } => children.first()?.0.top_right_pane_id(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -215,5 +264,84 @@ mod tests {
             layout.pane_ids(),
             vec![PaneId(0), PaneId(2), PaneId(1), PaneId(3)]
         );
+    }
+
+    #[test]
+    fn top_panes_of_single_pane() {
+        assert_eq!(pane(0).top_pane_ids(), vec![PaneId(0)]);
+        assert_eq!(pane(0).top_right_pane_id(), Some(PaneId(0)));
+    }
+
+    #[test]
+    fn top_panes_side_by_side() {
+        let mut layout = pane(0);
+        layout
+            .split(PaneId(0), Axis::Horizontal, PaneId(1))
+            .unwrap();
+        assert_eq!(layout.top_pane_ids(), vec![PaneId(0), PaneId(1)]);
+        assert_eq!(layout.top_right_pane_id(), Some(PaneId(1)));
+    }
+
+    #[test]
+    fn top_panes_stacked() {
+        let mut layout = pane(0);
+        layout.split(PaneId(0), Axis::Vertical, PaneId(1)).unwrap();
+        assert_eq!(layout.top_pane_ids(), vec![PaneId(0)]);
+        assert_eq!(layout.top_right_pane_id(), Some(PaneId(0)));
+    }
+
+    #[test]
+    fn top_panes_with_right_side_stacked() {
+        // 0 | 1
+        //   | -
+        //   | 2
+        let mut layout = pane(0);
+        layout
+            .split(PaneId(0), Axis::Horizontal, PaneId(1))
+            .unwrap();
+        layout.split(PaneId(1), Axis::Vertical, PaneId(2)).unwrap();
+        assert_eq!(layout.top_pane_ids(), vec![PaneId(0), PaneId(1)]);
+        assert_eq!(layout.top_right_pane_id(), Some(PaneId(1)));
+    }
+
+    #[test]
+    fn top_panes_with_top_side_by_side() {
+        // 0 | 1
+        // -----
+        //   2
+        let mut layout = pane(0);
+        layout.split(PaneId(0), Axis::Vertical, PaneId(2)).unwrap();
+        layout
+            .split(PaneId(0), Axis::Horizontal, PaneId(1))
+            .unwrap();
+        assert_eq!(layout.top_pane_ids(), vec![PaneId(0), PaneId(1)]);
+        assert_eq!(layout.top_right_pane_id(), Some(PaneId(1)));
+    }
+
+    #[test]
+    fn top_panes_deeply_nested() {
+        // 0 | 1 | 3
+        //   | ----
+        //   |  2
+        let mut layout = pane(0);
+        layout
+            .split(PaneId(0), Axis::Horizontal, PaneId(1))
+            .unwrap();
+        layout.split(PaneId(1), Axis::Vertical, PaneId(2)).unwrap();
+        layout
+            .split(PaneId(1), Axis::Horizontal, PaneId(3))
+            .unwrap();
+        assert_eq!(layout.top_pane_ids(), vec![PaneId(0), PaneId(1), PaneId(3)]);
+        assert_eq!(layout.top_right_pane_id(), Some(PaneId(3)));
+    }
+
+    #[test]
+    fn top_right_pane_of_empty_split() {
+        let layout = Layout::Split {
+            axis: Axis::Horizontal,
+            children: Vec::new(),
+        };
+        assert_eq!(layout.top_pane_ids(), Vec::new());
+        assert_eq!(layout.top_right_pane_id(), None);
     }
 }
