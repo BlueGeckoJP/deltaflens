@@ -83,6 +83,25 @@ encoder.write_image(&pixels, 8, 8, ExtendedColorType::Rgb8).unwrap();
 std::fs::write("p3-red-8x8.png", png).unwrap();
 ```
 
+`orientation-6.jxl` is `orientation-6.jpg` recompressed losslessly in the
+same way, which keeps its orientation. `progressive-256.jxl` is a 256 x 256
+image of a gradient with a grid, encoded with `jpegxl-rs` as lossy and
+progressive:
+
+```rust
+use jpegxl_rs::encode::{EncoderSpeed, encoder_builder};
+use jpegxl_sys::encoder::encode::JxlEncoderFrameSettingId;
+
+let mut encoder = encoder_builder()
+    .speed(EncoderSpeed::Squirrel)
+    .quality(1.0)
+    .build()
+    .unwrap();
+encoder.set_frame_option(JxlEncoderFrameSettingId::ProgressiveDc, 1);
+encoder.set_frame_option(JxlEncoderFrameSettingId::ProgressiveAc, 1);
+encoder.set_frame_option(JxlEncoderFrameSettingId::Responsive, 1);
+let jxl = encoder.encode::<u8>(&rgb_pixels, 256, 256).unwrap();
+
 `p3-table-curve-xyb-8x8.jxl` is lossy, so stored in XYB, with an ICC profile
 of Display P3 primaries and tone curves given as 64-entry tables of gamma 2.0.
 jxl-oxide cannot write this profile as an enum color encoding, so it renders

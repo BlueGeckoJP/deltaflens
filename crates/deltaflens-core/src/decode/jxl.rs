@@ -4,8 +4,10 @@ use std::{fs::File, io::Read, path::Path};
 
 use eyre::{Result, bail, eyre};
 use jxl_oxide::{
-    EnumColourEncoding, JxlImage, PixelFormat, RenderingIntent, color::ColourEncoding,
+    EnumColourEncoding, ExtraChannel, FrameHeader, JxlImage, PixelFormat, Render, RenderingIntent,
+    color::ColourEncoding, image::BitDepth,
 };
+use jxl_render::ImageBuffer;
 
 use super::{DecodedImage, convert_to_srgb, describes_srgb, limits};
 
@@ -34,6 +36,11 @@ pub(super) fn decode(path: &Path) -> Result<DecodedImage> {
         bail!("the file is truncated");
     }
     let metadata = &image.image_header().metadata;
+    let eight_bit = is_eight_bit(metadata.bit_depth)
+        && metadata
+            .ec_info
+            .iter()
+            .all(|channel| is_eight_bit(channel.bit_depth));
     // A color space given by an ICC profile is converted afterwards, as for
     // the other formats. Converting it with the moxcms support of jxl-oxide
     // gave wrong colors.
@@ -63,13 +70,143 @@ pub(super) fn decode(path: &Path) -> Result<DecodedImage> {
     let (width, height) = (image.width(), image.height());
     limits().reserve(u64::from(width) * u64::from(height) * 4)?;
 
+    let direct = image
+        .frame_header(0)
+        .is_some_and(|header| covers_image(header, width, height));
     let render = image.render_frame(0).map_err(|error| eyre!(error))?;
+    let output = Output {
+        width,
+        height,
+        direct,
+        eight_bit,
+        icc: icc.as_deref(),
+    };
+    to_image(&render, &output, path)
+}
+
+/// Returns whether samples of `bit_depth` are 8-bit integers.
+fn is_eight_bit(bit_depth: BitDepth) -> bool {
+    matches!(bit_depth, BitDepth::IntegerSample { bits_per_sample: 8 })
+}
+
+/// Returns whether the frame of `header` lies exactly over the image, so that
+/// its samples are at the same places as the pixels of the image.
+fn covers_image(header: &FrameHeader, width: u32, height: u32) -> bool {
+    header.x0 == 0 && header.y0 == 0 && header.width == width && header.height == height
+}
+
+/// What a rendered frame becomes.
+struct Output<'a> {
+    width: u32,
+    height: u32,
+    /// Whether the frame lies exactly over the image.
+    direct: bool,
+    /// Whether all channels are stored as 8-bit integers.
+    eight_bit: bool,
+    /// The color space to convert from, if it is given by an ICC profile.
+    icc: Option<&'a [u8]>,
+}
+
+/// Converts a rendered frame to BGRA in sRGB.
+fn to_image(render: &Render, output: &Output, path: &Path) -> Result<DecodedImage> {
+    let (width, height) = (output.width, output.height);
+    let mut pixels = match grids_to_rgba(render, output) {
+        Some(pixels) => pixels,
+        None => stream_to_rgba(render, width, height)?,
+    };
+    if let Some(icc) = output.icc
+        && let Err(error) = convert_to_srgb(&mut pixels, icc)
+    {
+        tracing::warn!(
+            "{}: colors are not converted to sRGB: {error:#}",
+            path.display()
+        );
+    }
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
+    Ok(DecodedImage {
+        width,
+        height,
+        pixels,
+    })
+}
+
+/// The 8-bit RGBA pixels of a rendered frame, read from its channels row by
+/// row, or `None` where only the stream of jxl-oxide gets them right: for a
+/// rotated or flipped image, a frame that does not lie exactly over the image,
+/// spot colors, or integer samples of other than 8 bits. The stream is much
+/// slower, as it reads each sample on its own.
+fn grids_to_rgba(render: &Render, output: &Output) -> Option<Vec<u8>> {
+    let (width, height) = (output.width as usize, output.height as usize);
+    let (extra_channels, extra_grids) = render.extra_channels();
+    if render.orientation() != 1
+        || !output.direct
+        || extra_channels.iter().any(ExtraChannel::is_spot_colour)
+    {
+        return None;
+    }
+    let colors: [&ImageBuffer; 3] = match render.color_channels() {
+        [gray] => [gray; 3],
+        [red, green, blue] => [red, green, blue],
+        _ => return None,
+    };
+    let alpha = extra_channels
+        .iter()
+        .position(ExtraChannel::is_alpha)
+        .map(|index| &extra_grids[index]);
+    let channels: Vec<(usize, &ImageBuffer)> = colors
+        .into_iter()
+        .enumerate()
+        .chain(alpha.map(|alpha| (3, alpha)))
+        .collect();
+    let usable = |grid: &ImageBuffer| {
+        grid.width() == width
+            && grid.height() == height
+            && (output.eight_bit || matches!(grid, ImageBuffer::F32(_)))
+    };
+    if !channels.iter().all(|(_, grid)| usable(grid)) {
+        return None;
+    }
+
+    // The same rounding as the stream.
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let from_f32 = |v: f32| (v * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
+    let from_int = |v: i32| u8::try_from(v.clamp(0, 255)).unwrap_or(u8::MAX);
+    let mut pixels = vec![u8::MAX; width * height * 4];
+    for (y, row) in pixels.chunks_exact_mut(width * 4).enumerate() {
+        for (channel, grid) in &channels {
+            let samples = row[*channel..].iter_mut().step_by(4);
+            match grid {
+                ImageBuffer::F32(grid) => {
+                    for (sample, &v) in samples.zip(grid.get_row(y)) {
+                        *sample = from_f32(v);
+                    }
+                }
+                ImageBuffer::I32(grid) => {
+                    for (sample, &v) in samples.zip(grid.get_row(y)) {
+                        *sample = from_int(v);
+                    }
+                }
+                ImageBuffer::I16(grid) => {
+                    for (sample, &v) in samples.zip(grid.get_row(y)) {
+                        *sample = from_int(i32::from(v));
+                    }
+                }
+            }
+        }
+    }
+    Some(pixels)
+}
+
+/// The 8-bit RGBA pixels of a rendered frame, through the stream of
+/// jxl-oxide, with the orientation applied.
+fn stream_to_rgba(render: &Render, width: u32, height: u32) -> Result<Vec<u8>> {
     let mut stream = render.stream();
     let channels = stream.channels() as usize;
     let mut samples = vec![0u8; width as usize * height as usize * channels];
     stream.write_to_buffer(&mut samples);
-
-    let mut pixels: Vec<u8> = match channels {
+    Ok(match channels {
         1 => samples.iter().flat_map(|&v| [v, v, v, u8::MAX]).collect(),
         2 => samples
             .as_chunks::<2>()
@@ -85,22 +222,6 @@ pub(super) fn decode(path: &Path) -> Result<DecodedImage> {
             .collect(),
         4 => samples,
         _ => bail!("unexpected number of channels: {channels}"),
-    };
-    if let Some(icc) = icc
-        && let Err(error) = convert_to_srgb(&mut pixels, &icc)
-    {
-        tracing::warn!(
-            "{}: colors are not converted to sRGB: {error:#}",
-            path.display()
-        );
-    }
-    for pixel in pixels.as_chunks_mut::<4>().0 {
-        pixel.swap(0, 2);
-    }
-    Ok(DecodedImage {
-        width,
-        height,
-        pixels,
     })
 }
 
@@ -135,5 +256,51 @@ mod tests {
                 .all(|(&actual, &expected)| actual.abs_diff(expected) <= 6);
             assert!(close, "{:?} is not close to {expected:?}", [r, g, b, a]);
         }
+    }
+
+    #[test]
+    fn channels_give_the_same_pixels_as_the_stream() {
+        for name in [
+            "red-3x2.jxl",
+            "rgba-2x2.jxl",
+            "gray-2x2.jxl",
+            "p3-red-8x8.jxl",
+            "progressive-256.jxl",
+        ] {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(name);
+            let mut image = JxlImage::builder().open(&path).unwrap();
+            image.request_color_encoding(EnumColourEncoding::srgb(RenderingIntent::Relative));
+            let render = image.render_frame(0).unwrap();
+            let (width, height) = (image.width(), image.height());
+            let output = Output {
+                width,
+                height,
+                direct: true,
+                eight_bit: true,
+                icc: None,
+            };
+            assert_eq!(
+                grids_to_rgba(&render, &output).as_ref(),
+                Some(&stream_to_rgba(&render, width, height).unwrap()),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn rotated_image_goes_through_the_stream() {
+        // Stored as 16x8 and rotated by the EXIF orientation, recompressed
+        // from the JPEG.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/orientation-6.jxl");
+        let image = JxlImage::builder().open(&path).unwrap();
+        assert_ne!(image.image_header().metadata.orientation, 1);
+        let image = decode(&path).unwrap();
+        assert_eq!((image.width(), image.height()), (8, 16));
+        // Red on top, blue below, as the JPEG.
+        let pixel = |x: u32, y: u32| image.pixels().as_chunks::<4>().0[(y * 8 + x) as usize];
+        assert!(pixel(4, 3)[2] > 200 && pixel(4, 3)[0] < 50);
+        assert!(pixel(4, 12)[0] > 200 && pixel(4, 12)[2] < 50);
     }
 }
