@@ -10,8 +10,8 @@ use deltaflens_core::{
 use eyre::{Result, eyre};
 use gpui::{
     AnyElement, Bounds, ClickEvent, Context, CursorStyle, DragMoveEvent, ElementId, Entity,
-    FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PathPromptOptions, Pixels, Point, Rgba, SharedString, Window, actions, div, prelude::*, px,
+    FocusHandle, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions,
+    Pixels, Point, Rgba, SharedString, Subscription, Window, actions, div, prelude::*, px,
     relative,
 };
 
@@ -164,6 +164,8 @@ pub struct WorkspaceView {
     /// tab bar.
     move_pending: bool,
     context_menu: Entity<ContextMenu>,
+    /// Closes the menu when a key is pressed in the window.
+    _close_menu_on_key: Subscription,
     /// Where a tab or image dragged over a pane would go.
     drop_target: Option<(PaneId, DropZone)>,
     /// The session last saved or tried to, to save it again only when it
@@ -194,6 +196,8 @@ impl WorkspaceView {
         .detach();
         let theme = Theme::for_choice(settings.read(cx).settings().theme, window.appearance());
         cx.set_global(theme);
+        let context_menu = cx.new(|_| ContextMenu::default());
+        let close_menu_on_key = close_menu_on_key(&context_menu, window, cx);
         Self {
             workspace: Workspace::new(),
             views: HashMap::new(),
@@ -203,7 +207,8 @@ impl WorkspaceView {
             focus_handle,
             title: APP_NAME.to_owned(),
             move_pending: false,
-            context_menu: cx.new(|_| ContextMenu::default()),
+            context_menu,
+            _close_menu_on_key: close_menu_on_key,
             drop_target: None,
             saved_session: None,
         }
@@ -1444,13 +1449,6 @@ impl Render for WorkspaceView {
         let content = div()
             .size_full()
             .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape"
-                    && this.context_menu.update(cx, ContextMenu::dismiss)
-                {
-                    cx.stop_propagation();
-                }
-            }))
             .on_action(cx.listener(Self::open))
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::close_active_tab))
@@ -1517,6 +1515,33 @@ impl WorkspaceView {
                 )),
         )
     }
+}
+
+/// Closes the menu of `window` when a key other than a modifier is pressed
+/// there, before the key reaches an action. Otherwise the key could move to
+/// another image or folder, and leave a menu that acts on the one before.
+/// Escape only closes the menu; other keys do what they do as well.
+fn close_menu_on_key(
+    context_menu: &Entity<ContextMenu>,
+    window: &Window,
+    cx: &mut gpui::App,
+) -> Subscription {
+    let context_menu = context_menu.downgrade();
+    let window_handle = window.window_handle();
+    cx.intercept_keystrokes(move |event, window, cx| {
+        let key = event.keystroke.key.as_str();
+        // A modifier pressed and released alone comes as a keystroke too.
+        let modifier_only = matches!(key, "shift" | "control" | "alt" | "platform" | "function");
+        if window.window_handle() != window_handle || modifier_only {
+            return;
+        }
+        let closed = context_menu
+            .update(cx, ContextMenu::dismiss)
+            .unwrap_or_default();
+        if closed && key == "escape" {
+            cx.stop_propagation();
+        }
+    })
 }
 
 /// The working directory, or else the home directory.

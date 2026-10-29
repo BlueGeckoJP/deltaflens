@@ -50,8 +50,8 @@ impl Menu {
 impl FluentBuilder for Menu {}
 
 /// The menu open in a window, if any. Opening a menu closes the one open
-/// before. It closes with Escape, which the view that has the focus passes to
-/// [`Self::dismiss`], or by pressing the mouse outside of it.
+/// before. It closes by pressing the mouse outside of it, or a key, which the
+/// window passes to [`Self::dismiss`].
 #[derive(Default)]
 pub struct ContextMenu {
     menu: Option<Menu>,
