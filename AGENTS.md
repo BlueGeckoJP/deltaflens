@@ -31,6 +31,20 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+## AVIF
+
+AVIF は Cargo の feature `avif` を有効にしたときだけ開ける。デコードには dav1d を使うので、ビルドする環境に dav1d の開発用のパッケージを入れる（pkg-config で見つかる必要がある）。
+
+- Debian / Ubuntu: `libdav1d-dev`
+- Arch: `dav1d`
+
+```sh
+cargo run --features avif
+cargo test --workspace --features avif
+```
+
+既定の feature では、システムのライブラリなしでビルドでき、AVIF は対応形式に入らない（エクスプローラーにも ←→ の一覧にも出ない）。
+
 ## コードの約束
 
 - パスは `String` ではなく `PathBuf` / `&Path` で持つ。

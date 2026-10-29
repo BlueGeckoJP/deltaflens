@@ -1,3 +1,4 @@
+mod color;
 mod encode;
 mod jxl;
 mod thumbnail;
@@ -8,6 +9,7 @@ use std::path::Path;
 use eyre::{Result, WrapErr};
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
 
+use self::color::{convert_to_srgb, describes_srgb};
 pub(crate) use self::{encode::encode_png, thumbnail::fit_within};
 pub use self::{thumbnail::thumbnail, thumbnail_cache::ThumbnailCache};
 
@@ -70,8 +72,8 @@ impl DecodedImage {
 ///
 /// The orientation is applied, images with more than 8 bits per channel are
 /// converted to 8 bits, and only the first frame of an animation is decoded.
-/// JPEG XL images are converted to sRGB, unless their color space is given by
-/// an ICC profile.
+/// Images are converted to sRGB from the color space of their ICC profile,
+/// or of the color encoding of JPEG XL.
 ///
 /// # Errors
 ///
@@ -91,10 +93,25 @@ fn decode_inner(path: &Path) -> Result<DecodedImage> {
     // `ImageReader::decode` checks this, but `into_decoder` does not.
     limits().reserve(decoder.total_bytes())?;
     let orientation = decoder.orientation()?;
+    let icc = decoder.icc_profile().unwrap_or_else(|error| {
+        tracing::warn!(
+            "{}: failed to read the ICC profile: {error}",
+            path.display()
+        );
+        None
+    });
     let mut image = DynamicImage::from_decoder(decoder)?;
     image.apply_orientation(orientation);
 
     let mut buffer = image.into_rgba8();
+    if let Some(icc) = icc
+        && let Err(error) = convert_to_srgb(&mut buffer, &icc)
+    {
+        tracing::warn!(
+            "{}: colors are not converted to sRGB: {error:#}",
+            path.display()
+        );
+    }
     for pixel in buffer.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
@@ -106,11 +123,15 @@ fn decode_inner(path: &Path) -> Result<DecodedImage> {
 }
 
 /// Returns whether the extension of `path` (case-insensitive) belongs to a
-/// format that [`decode`] can read.
+/// format that [`decode`] can read. AVIF is one only with the `avif`
+/// feature.
 #[must_use]
 pub fn is_supported_image(path: &Path) -> bool {
     path.extension().is_some_and(|extension| {
         extension.eq_ignore_ascii_case("jxl")
+            // `ImageFormat::reading_enabled` tells whether the AVIF encoder
+            // of `image` is built, not the decoder.
+            || (cfg!(feature = "avif") && extension.eq_ignore_ascii_case("avif"))
             || ImageFormat::from_extension(extension).is_some_and(|format| format.reading_enabled())
     })
 }
@@ -211,6 +232,17 @@ mod tests {
     }
 
     #[test]
+    fn decode_converts_icc_profiles_to_srgb() {
+        // Each holds the red of sRGB in Display P3, with a Display P3 profile.
+        for name in ["p3-red-8x8.png", "p3-red-8x8.jpg", "p3-red-8x8.jxl"] {
+            let image = decode(&fixture(name)).unwrap();
+            for &pixel in image.pixels().as_chunks::<4>().0 {
+                assert_close(pixel, RED);
+            }
+        }
+    }
+
+    #[test]
     fn decode_fails_on_truncated_jxl() {
         assert!(decode(&fixture("truncated.jxl")).is_err());
     }
@@ -241,10 +273,33 @@ mod tests {
 
     #[test]
     fn unsupported_extensions() {
-        // AVIF and DDS are known to `image` but cannot be read with the
-        // enabled features.
-        for name in ["a.txt", "a.avif", "a.dds", "png", "a"] {
+        // DDS is known to `image` but cannot be read with the enabled
+        // features.
+        for name in ["a.txt", "a.dds", "png", "a"] {
             assert!(!is_supported_image(Path::new(name)), "{name}");
+        }
+    }
+
+    #[test]
+    fn avif_is_supported_only_with_its_feature() {
+        for name in ["a.avif", "a.AVIF"] {
+            assert_eq!(is_supported_image(Path::new(name)), cfg!(feature = "avif"));
+        }
+    }
+
+    #[cfg(not(feature = "avif"))]
+    #[test]
+    fn decode_avif_fails_without_its_feature() {
+        assert!(decode(&fixture("red-3x2.avif")).is_err());
+    }
+
+    #[cfg(feature = "avif")]
+    #[test]
+    fn decode_avif_as_bgra() {
+        let image = decode(&fixture("red-3x2.avif")).unwrap();
+        assert_eq!((image.width(), image.height()), (3, 2));
+        for &pixel in image.pixels().as_chunks::<4>().0 {
+            assert_close(pixel, RED);
         }
     }
 }

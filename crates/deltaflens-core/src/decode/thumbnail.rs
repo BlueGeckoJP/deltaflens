@@ -92,6 +92,18 @@ mod tests {
     }
 
     #[test]
+    fn thumbnail_is_converted_to_srgb() {
+        // The red of sRGB in Display P3, with a Display P3 profile.
+        let image = thumbnail(&fixture("p3-red-8x8.png"), 4).unwrap();
+        for pixel in image.pixels().as_chunks::<4>().0 {
+            assert!(
+                pixel.iter().zip(RED).all(|(&a, e)| a.abs_diff(e) <= 3),
+                "{pixel:?}"
+            );
+        }
+    }
+
+    #[test]
     fn thumbnail_of_corrupt_image_fails() {
         assert!(thumbnail(&fixture("truncated.png"), 256).is_err());
     }
