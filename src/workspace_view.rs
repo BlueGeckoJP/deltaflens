@@ -18,6 +18,8 @@ use gpui::{
 use crate::{
     explorer::{DraggedImage, Explorer, ExplorerEvent},
     images::Images,
+    settings::SettingsStore,
+    settings_view::SettingsView,
     thumbnails::Thumbnails,
     viewer::Viewer,
     window_frame::{self, ROUNDING},
@@ -53,6 +55,7 @@ actions!(
         LayoutGrid,
         LayoutExplorerAndViewer,
         ReopenClosedTab,
+        OpenSettings,
     ]
 );
 
@@ -146,6 +149,7 @@ struct TitleBarPart {
 enum TabView {
     Viewer(Entity<Viewer>),
     Explorer(Entity<Explorer>),
+    Settings(Entity<SettingsView>),
 }
 
 impl TabView {
@@ -153,6 +157,7 @@ impl TabView {
         match self {
             Self::Viewer(viewer) => viewer.clone().into_any_element(),
             Self::Explorer(explorer) => explorer.clone().into_any_element(),
+            Self::Settings(settings) => settings.clone().into_any_element(),
         }
     }
 }
@@ -164,6 +169,7 @@ pub struct WorkspaceView {
     views: HashMap<TabId, TabView>,
     thumbnails: Entity<Thumbnails>,
     images: Entity<Images>,
+    settings: Entity<SettingsStore>,
     focus_handle: FocusHandle,
     /// The window title last set, to avoid setting it on every frame.
     title: String,
@@ -180,11 +186,15 @@ impl WorkspaceView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
+        let settings = cx.new(SettingsStore::new);
+        // Show errors in the settings as they come and go.
+        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         Self {
             workspace: Workspace::new(),
             views: HashMap::new(),
             thumbnails: cx.new(Thumbnails::new),
-            images: cx.new(Images::new),
+            images: cx.new(|cx| Images::new(&settings, cx)),
+            settings,
             focus_handle,
             title: APP_NAME.to_owned(),
             move_pending: false,
@@ -263,11 +273,17 @@ impl WorkspaceView {
         match content {
             TabContent::Viewer { path } => {
                 let images = self.images.clone();
-                TabView::Viewer(cx.new(|cx| Viewer::new(path, images, cx)))
+                let settings = &self.settings;
+                TabView::Viewer(cx.new(|cx| Viewer::new(path, images, settings, cx)))
+            }
+            TabContent::Settings => {
+                let settings = self.settings.clone();
+                TabView::Settings(cx.new(|cx| SettingsView::new(settings, window, cx)))
             }
             TabContent::Explorer { dir } => {
                 let thumbnails = self.thumbnails.clone();
-                let explorer = cx.new(|cx| Explorer::new(dir, thumbnails, cx));
+                let settings = self.settings.clone();
+                let explorer = cx.new(|cx| Explorer::new(dir, thumbnails, settings, cx));
                 cx.subscribe_in(&explorer, window, move |this, _, event, window, cx| {
                     this.on_explorer_event(tab_id, event, window, cx);
                 })
@@ -354,14 +370,14 @@ impl WorkspaceView {
     fn active_viewer(&self) -> Option<&Entity<Viewer>> {
         match self.views.get(&self.active_tab()?.id())? {
             TabView::Viewer(viewer) => Some(viewer),
-            TabView::Explorer(_) => None,
+            TabView::Explorer(_) | TabView::Settings(_) => None,
         }
     }
 
     fn active_explorer(&self) -> Option<&Entity<Explorer>> {
         match self.views.get(&self.active_tab()?.id())? {
             TabView::Explorer(explorer) => Some(explorer),
-            TabView::Viewer(_) => None,
+            TabView::Viewer(_) | TabView::Settings(_) => None,
         }
     }
 
@@ -371,6 +387,7 @@ impl WorkspaceView {
         let from_tab = self.active_tab().and_then(|tab| match tab.content() {
             TabContent::Explorer { dir } => Some(dir.clone()),
             TabContent::Viewer { path } => path.parent().map(Path::to_path_buf),
+            TabContent::Settings => None,
         });
         from_tab.or_else(default_dir)
     }
@@ -426,6 +443,20 @@ impl WorkspaceView {
     #[expect(clippy::unused_self, reason = "`cx.listener` takes a method")]
     fn open(&mut self, _: &Open, window: &mut Window, cx: &mut Context<Self>) {
         Self::prompt_for_image(window, cx, Self::open_in_active_tab);
+    }
+
+    /// Shows the settings tab, opening it in the focused pane if there is
+    /// none.
+    fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
+        match self.workspace.find_tab(&TabContent::Settings) {
+            Some(tab_id) => {
+                if let Err(error) = self.workspace.activate_tab(tab_id) {
+                    tracing::error!("{error:#}");
+                }
+                cx.notify();
+            }
+            None => self.open_tab(TabContent::Settings, window, cx),
+        }
     }
 
     /// Opens an explorer of the current folder in a new tab.
@@ -783,6 +814,7 @@ impl WorkspaceView {
         let exists = |content: &TabContent| match content {
             TabContent::Viewer { path } => path.is_file(),
             TabContent::Explorer { dir } => dir.is_dir(),
+            TabContent::Settings => true,
         };
         if self.workspace.reopen_closed_tab(exists).is_some() {
             self.sync_views(window, cx);
@@ -1025,7 +1057,11 @@ impl WorkspaceView {
             // Pressing anywhere in a pane focuses it, so that keys act on it.
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _: &MouseDownEvent, _, cx| this.focus_pane(pane_id, cx)),
+                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                    // Take the keys back from a text field.
+                    window.focus(&this.focus_handle, cx);
+                    this.focus_pane(pane_id, cx);
+                }),
             )
             .on_mouse_down(
                 MouseButton::Right,
@@ -1312,6 +1348,7 @@ fn tab_name(tab: &Tab) -> String {
     let path = match tab.content() {
         TabContent::Viewer { path } => path,
         TabContent::Explorer { dir } => dir,
+        TabContent::Settings => return "Settings".to_owned(),
     };
     path.file_name()
         .unwrap_or(path.as_os_str())
@@ -1358,7 +1395,17 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::layout_grid))
             .on_action(cx.listener(Self::layout_explorer_and_viewer))
             .on_action(cx.listener(Self::reopen_closed_tab))
-            .child(self.render_layout(self.workspace.layout(), &[], &title_bar, window, cx))
+            .on_action(cx.listener(Self::open_settings))
+            .flex()
+            .flex_col()
+            .child(div().flex_1().min_h_0().child(self.render_layout(
+                self.workspace.layout(),
+                &[],
+                &title_bar,
+                window,
+                cx,
+            )))
+            .children(self.render_settings_errors(cx))
             .when_some(self.tab_menu.as_ref(), |this, menu| {
                 this.child(
                     deferred(
@@ -1371,6 +1418,31 @@ impl Render for WorkspaceView {
                 )
             });
         window_frame::window_frame(content, window)
+    }
+}
+
+impl WorkspaceView {
+    /// A bar at the bottom that tells about mistakes in the settings file,
+    /// until they are fixed.
+    fn render_settings_errors(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let errors = self.settings.read(cx).errors();
+        let first = errors.first()?;
+        let more = match errors.len() {
+            1 => String::new(),
+            count => format!(" ({} more)", count - 1),
+        };
+        Some(
+            div()
+                .flex_shrink_0()
+                .px_3()
+                .py_1()
+                .text_sm()
+                .bg(rgb(0x4a_22_22))
+                .text_color(rgb(0xf0_c0_c0))
+                .child(format!(
+                    "Settings: {first}{more} Ctrl+, shows the settings."
+                )),
+        )
     }
 }
 

@@ -1,6 +1,9 @@
 mod explorer;
 mod images;
 mod render_image;
+mod settings;
+mod settings_view;
+mod text_input;
 mod thumbnails;
 mod viewer;
 mod window_frame;
@@ -20,9 +23,9 @@ use tracing_subscriber::EnvFilter;
 use crate::workspace_view::{
     ActivateNextTab, ActivatePreviousTab, CloseTab, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
     FocusPaneUp, GoBack, GoForward, GoUp, LayoutExplorerAndViewer, LayoutGrid, LayoutSingle,
-    LayoutThreeColumns, LayoutTwoColumns, NewTab, NextImage, Open, PreviousImage, ReopenClosedTab,
-    ResetView, SplitDown, SplitRight, SwapPaneDown, SwapPaneLeft, SwapPaneRight, SwapPaneUp,
-    WorkspaceView,
+    LayoutThreeColumns, LayoutTwoColumns, NewTab, NextImage, Open, OpenSettings, PreviousImage,
+    ReopenClosedTab, ResetView, SplitDown, SplitRight, SwapPaneDown, SwapPaneLeft, SwapPaneRight,
+    SwapPaneUp, WorkspaceView,
 };
 
 actions!(deltaflens, [Quit]);
@@ -81,7 +84,9 @@ fn main() -> Result<()> {
             KeyBinding::new("ctrl-k 3", LayoutThreeColumns, None),
             KeyBinding::new("ctrl-k 4", LayoutGrid, None),
             KeyBinding::new("ctrl-k 5", LayoutExplorerAndViewer, None),
+            KeyBinding::new("ctrl-,", OpenSettings, None),
         ]);
+        cx.bind_keys(text_input::key_bindings());
 
         let options = WindowOptions {
             titlebar: Some(TitlebarOptions {

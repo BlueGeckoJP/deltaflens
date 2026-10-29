@@ -15,21 +15,23 @@ pub enum Direction {
 
 /// Lists the files in `dir` that [`is_supported_image`] accepts, in natural
 /// order of their file names. Hidden files, whose names start with a dot, are
-/// left out as in the explorer.
+/// left out unless `show_hidden` is set, as in the explorer.
 ///
 /// # Errors
 ///
 /// Returns an error if the directory cannot be read.
-pub fn list_images(dir: &Path) -> Result<Vec<PathBuf>> {
-    list_images_inner(dir).wrap_err_with(|| format!("failed to list {}", dir.display()))
+pub fn list_images(dir: &Path, show_hidden: bool) -> Result<Vec<PathBuf>> {
+    list_images_inner(dir, show_hidden)
+        .wrap_err_with(|| format!("failed to list {}", dir.display()))
 }
 
-fn list_images_inner(dir: &Path) -> Result<Vec<PathBuf>> {
+fn list_images_inner(dir: &Path, show_hidden: bool) -> Result<Vec<PathBuf>> {
     let mut images = Vec::new();
     for entry in dir.read_dir()? {
         let path = entry?.path();
+        let shown = show_hidden || !is_hidden(&path);
         // `is_file` follows symbolic links.
-        if !is_hidden(&path) && is_supported_image(&path) && path.is_file() {
+        if shown && is_supported_image(&path) && path.is_file() {
             images.push(path);
         }
     }
@@ -133,21 +135,21 @@ mod tests {
     #[test]
     fn list_images_in_natural_order() {
         let dir = TempDir::with_files("folder-natural", &["img10.png", "img2.png", "img1.png"]);
-        let images = list_images(dir.path()).unwrap();
+        let images = list_images(dir.path(), false).unwrap();
         assert_eq!(dir.names(&images), ["img1.png", "img2.png", "img10.png"]);
     }
 
     #[test]
     fn list_images_ignores_case() {
         let dir = TempDir::with_files("folder-case", &["b.png", "A.png", "c.JPG"]);
-        let images = list_images(dir.path()).unwrap();
+        let images = list_images(dir.path(), false).unwrap();
         assert_eq!(dir.names(&images), ["A.png", "b.png", "c.JPG"]);
     }
 
     #[test]
     fn list_images_includes_avif_only_with_its_feature() {
         let dir = TempDir::with_files("folder-avif", &["a.png", "b.avif"]);
-        let images = list_images(dir.path()).unwrap();
+        let images = list_images(dir.path(), false).unwrap();
         let expected: &[&str] = if cfg!(feature = "avif") {
             &["a.png", "b.avif"]
         } else {
@@ -160,21 +162,28 @@ mod tests {
     fn list_images_skips_unsupported_files_and_directories() {
         let dir = TempDir::with_files("folder-unsupported", &["a.png", "notes.txt", "b.dds", "c"]);
         fs::create_dir(dir.path().join("folder.png")).unwrap();
-        let images = list_images(dir.path()).unwrap();
+        let images = list_images(dir.path(), false).unwrap();
         assert_eq!(dir.names(&images), ["a.png"]);
+    }
+
+    #[test]
+    fn list_images_includes_hidden_files_when_shown() {
+        let dir = TempDir::with_files("folder-hidden-shown", &["a.png", ".b.png"]);
+        let images = list_images(dir.path(), true).unwrap();
+        assert_eq!(dir.names(&images), [".b.png", "a.png"]);
     }
 
     #[test]
     fn list_images_skips_hidden_files() {
         let dir = TempDir::with_files("folder-hidden", &["a.png", ".b.png", "c.png"]);
-        let images = list_images(dir.path()).unwrap();
+        let images = list_images(dir.path(), false).unwrap();
         assert_eq!(dir.names(&images), ["a.png", "c.png"]);
     }
 
     #[test]
     fn hidden_image_moves_to_the_images_around_it() {
         let dir = TempDir::with_files("folder-hidden-neighbor", &["a.png", ".b.png", "c.png"]);
-        let images = list_images(dir.path()).unwrap();
+        let images = list_images(dir.path(), false).unwrap();
         let hidden = dir.path().join(".b.png");
         let name = |path: &Path| path.file_name().unwrap().to_string_lossy().into_owned();
         // ".b.png" sorts before "a.png", as the dot comes first.
@@ -192,13 +201,16 @@ mod tests {
     #[test]
     fn list_images_of_empty_directory() {
         let dir = TempDir::with_files("folder-empty", &[]);
-        assert_eq!(list_images(dir.path()).unwrap(), Vec::<PathBuf>::new());
+        assert_eq!(
+            list_images(dir.path(), false).unwrap(),
+            Vec::<PathBuf>::new()
+        );
     }
 
     #[test]
     fn list_images_of_missing_directory_fails() {
         let dir = TempDir::with_files("folder-missing", &[]);
-        assert!(list_images(&dir.path().join("missing")).is_err());
+        assert!(list_images(&dir.path().join("missing"), false).is_err());
     }
 
     #[test]

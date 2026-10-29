@@ -47,20 +47,22 @@ pub struct Sort {
 }
 
 /// Lists the folders and supported images in `dir`, in no particular order.
-/// Hidden entries, whose names start with a dot, are left out.
+/// Hidden entries, whose names start with a dot, are left out unless
+/// `show_hidden` is set.
 ///
 /// # Errors
 ///
 /// Returns an error if the directory cannot be read.
-pub fn list_entries(dir: &Path) -> Result<Vec<Entry>> {
-    list_entries_inner(dir).wrap_err_with(|| format!("failed to list {}", dir.display()))
+pub fn list_entries(dir: &Path, show_hidden: bool) -> Result<Vec<Entry>> {
+    list_entries_inner(dir, show_hidden)
+        .wrap_err_with(|| format!("failed to list {}", dir.display()))
 }
 
-fn list_entries_inner(dir: &Path) -> Result<Vec<Entry>> {
+fn list_entries_inner(dir: &Path, show_hidden: bool) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
     for entry in dir.read_dir()? {
         let path = entry?.path();
-        if platform::is_hidden(&path) {
+        if !show_hidden && platform::is_hidden(&path) {
             continue;
         }
         // `metadata` follows symbolic links. Entries it fails on, such as broken
@@ -141,7 +143,7 @@ mod tests {
         let dir = TempDir::with_files("explorer-list", &["a.png", "b.JXL", "notes.txt", "c"]);
         fs::create_dir(dir.path().join("sub")).unwrap();
         fs::create_dir(dir.path().join("folder.png")).unwrap();
-        let mut entries = list_entries(dir.path()).unwrap();
+        let mut entries = list_entries(dir.path(), false).unwrap();
         entries.sort_by(|a, b| a.path.cmp(&b.path));
         let paths: Vec<_> = entries.iter().map(|entry| entry.path.clone()).collect();
         let kinds: Vec<_> = entries.iter().map(|entry| entry.kind).collect();
@@ -162,14 +164,17 @@ mod tests {
     fn list_entries_skips_hidden_entries() {
         let dir = TempDir::with_files("explorer-hidden", &[".hidden.png", "shown.png"]);
         fs::create_dir(dir.path().join(".git")).unwrap();
-        let entries = list_entries(dir.path()).unwrap();
+        let entries = list_entries(dir.path(), false).unwrap();
         assert_eq!(names(&entries), ["shown.png"]);
+        let mut entries = list_entries(dir.path(), true).unwrap();
+        entries.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(names(&entries), [".git", ".hidden.png", "shown.png"]);
     }
 
     #[test]
     fn list_entries_of_missing_directory_fails() {
         let dir = TempDir::with_files("explorer-missing", &[]);
-        assert!(list_entries(&dir.path().join("missing")).is_err());
+        assert!(list_entries(&dir.path().join("missing"), false).is_err());
     }
 
     #[test]

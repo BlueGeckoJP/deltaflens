@@ -40,6 +40,8 @@ natord = "1.0"
 # The same version as image uses. Reads and writes the text chunks that the
 # freedesktop thumbnail cache keeps in its PNG files.
 png = "0.18"
+# Reads and writes the settings file, keeping comments written by hand.
+toml_edit = "0.25"
 tracing = "0.1"
 
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]

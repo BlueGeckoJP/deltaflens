@@ -29,6 +29,12 @@ pub fn cache_dir() -> Option<PathBuf> {
     xdg_dir("XDG_CACHE_HOME", ".cache")
 }
 
+/// The directory for settings: `$XDG_CONFIG_HOME`, or `~/.config`.
+#[must_use]
+pub fn config_dir() -> Option<PathBuf> {
+    xdg_dir("XDG_CONFIG_HOME", ".config")
+}
+
 /// The directory of the XDG Base Directory Specification in the environment
 /// variable `var`, or else `default` in the home directory.
 fn xdg_dir(var: &str, default: &str) -> Option<PathBuf> {

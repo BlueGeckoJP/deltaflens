@@ -274,6 +274,11 @@ impl Workspace {
                 self.move_tab_to(tab_id, left);
                 self.focused_pane = left;
             }
+            // Shown in the larger pane, like an image.
+            TabContent::Settings => {
+                self.move_tab_to(tab_id, right);
+                self.focused_pane = right;
+            }
         }
     }
 
@@ -429,6 +434,33 @@ impl Workspace {
         let tab_id = TabId(self.allocate_id());
         self.pane_mut(pane_id)?.add_tab(Tab::new(tab_id, content));
         Ok(tab_id)
+    }
+
+    /// Activates the tab and focuses its pane.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the tab is not open.
+    pub fn activate_tab(&mut self, tab_id: TabId) -> Result<()> {
+        let pane_id = self
+            .pane_of_tab(tab_id)
+            .ok_or_else(|| eyre!("tab {tab_id:?} is not open"))?;
+        self.pane_mut(pane_id)?.activate_tab(tab_id)?;
+        self.focused_pane = pane_id;
+        Ok(())
+    }
+
+    /// The first open tab that shows `content`, if any.
+    #[must_use]
+    pub fn find_tab(&self, content: &TabContent) -> Option<TabId> {
+        self.layout.pane_ids().into_iter().find_map(|pane_id| {
+            self.panes
+                .get(&pane_id)?
+                .tabs()
+                .iter()
+                .find(|tab| tab.content() == content)
+                .map(Tab::id)
+        })
     }
 
     /// The pane that has the tab, if any.
@@ -718,6 +750,40 @@ mod tests {
             all_contents(&workspace),
             [vec![explorer("/pictures")], vec![viewer("/pictures/a.jxl")]]
         );
+    }
+
+    #[test]
+    fn explorer_and_viewer_puts_settings_on_the_right() {
+        let mut workspace = Workspace::new();
+        let first = workspace.focused_pane();
+        workspace.open_tab(first, TabContent::Settings).unwrap();
+
+        workspace.apply_preset(Preset::ExplorerAndViewer);
+
+        assert_eq!(
+            all_contents(&workspace),
+            [vec![], vec![TabContent::Settings]]
+        );
+    }
+
+    #[test]
+    fn find_and_activate_a_tab_in_another_pane() {
+        let mut workspace = Workspace::new();
+        let first = workspace.focused_pane();
+        let settings = workspace.open_tab(first, TabContent::Settings).unwrap();
+        workspace.open_tab(first, viewer("a.jxl")).unwrap();
+        let second = workspace.split_pane(first, Axis::Horizontal).unwrap();
+        assert_eq!(workspace.focused_pane(), second);
+
+        assert_eq!(workspace.find_tab(&TabContent::Settings), Some(settings));
+        assert_eq!(workspace.find_tab(&viewer("b.jxl")), None);
+        workspace.activate_tab(settings).unwrap();
+        assert_eq!(workspace.focused_pane(), first);
+        assert_eq!(
+            active_content(&workspace, first),
+            Some(TabContent::Settings)
+        );
+        assert!(workspace.activate_tab(TabId(999)).is_err());
     }
 
     #[test]

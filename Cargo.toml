@@ -16,6 +16,9 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "54478042
 # Only for wrapping decoded pixels in the buffer type gpui expects.
 image = { version = "0.25", default-features = false }
 tracing = "0.1"
+# The same version as gpui uses. Moves the cursor of a text field by whole
+# characters as the user sees them.
+unicode-segmentation = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]

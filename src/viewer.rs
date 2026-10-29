@@ -14,7 +14,10 @@ use gpui::{
     Task, Window, canvas, div, point, prelude::*, px, rgb, size,
 };
 
-use crate::images::{ImageKey, Images, ImagesEvent, Picture, Request};
+use crate::{
+    images::{ImageKey, Images, ImagesEvent, Picture, Request},
+    settings::SettingsStore,
+};
 
 /// How much one wheel notch zooms.
 const ZOOM_STEP: f32 = 1.2;
@@ -62,6 +65,8 @@ pub struct Viewer {
     viewport: Option<(Bounds<Pixels>, f32)>,
     /// The last mouse position while panning.
     drag_position: Option<gpui::Point<Pixels>>,
+    /// Whether moving between images includes hidden files.
+    show_hidden: bool,
     /// The images in the folder of the current image, reused while moving
     /// within it.
     folder: Option<Folder>,
@@ -75,8 +80,25 @@ struct Folder {
 }
 
 impl Viewer {
-    pub fn new(path: PathBuf, images: Entity<Images>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        path: PathBuf,
+        images: Entity<Images>,
+        settings: &Entity<SettingsStore>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let id = cx.entity_id();
+        // List the folder again when hidden files are shown or hidden.
+        cx.observe(settings, |this, settings, cx| {
+            let show_hidden = settings.read(cx).settings().show_hidden_files;
+            if show_hidden != this.show_hidden {
+                this.show_hidden = show_hidden;
+                this.folder = None;
+                this.folder_task = None;
+                this.list_folder(cx);
+            }
+        })
+        .detach();
+        let show_hidden = settings.read(cx).settings().show_hidden_files;
         cx.on_release(move |this, cx| {
             this.images.update(cx, |images, cx| images.forget(id, cx));
         })
@@ -101,6 +123,7 @@ impl Viewer {
             placed: None,
             viewport: None,
             drag_position: None,
+            show_hidden,
             folder: None,
             folder_task: None,
         };
@@ -289,13 +312,14 @@ impl Viewer {
             return;
         }
         let dir = dir.to_path_buf();
+        let show_hidden = self.show_hidden;
         let task = cx.spawn({
             let dir = dir.clone();
             async move |this, cx| {
                 let result = cx
                     .background_spawn({
                         let dir = dir.clone();
-                        async move { list_images(&dir) }
+                        async move { list_images(&dir, show_hidden) }
                     })
                     .await;
                 let _ = this.update(cx, |this, cx| {
