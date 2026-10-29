@@ -343,7 +343,8 @@ impl WorkspaceView {
             TabContent::Viewer { path } => {
                 let images = self.images.clone();
                 let settings = &self.settings;
-                TabView::Viewer(cx.new(|cx| Viewer::new(path, images, settings, cx)))
+                let context_menu = self.context_menu.clone();
+                TabView::Viewer(cx.new(|cx| Viewer::new(path, images, settings, context_menu, cx)))
             }
             TabContent::Settings => {
                 let settings = self.settings.clone();

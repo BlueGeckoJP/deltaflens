@@ -1,22 +1,19 @@
 use std::{
     ops::Range,
     path::{Path, PathBuf},
-    process::Stdio,
 };
 
 use deltaflens_core::{
-    Entry, EntryKind, History, Sort, SortKey, SortOrder, external_command, list_entries, platform,
-    png_for_clipboard, run_with_input, sort_entries,
+    Entry, EntryKind, History, Sort, SortKey, SortOrder, list_entries, sort_entries,
 };
-use eyre::eyre;
 use gpui::{
-    AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, MouseButton,
-    MouseDownEvent, NavigationDirection, ObjectFit, Pixels, Point, Rgba, ScrollStrategy,
-    SharedString, Task, UniformListScrollHandle, Window, container_query, div, img, prelude::*, px,
-    uniform_list,
+    AnyElement, App, ClickEvent, Context, Entity, EventEmitter, MouseButton, MouseDownEvent,
+    NavigationDirection, ObjectFit, Pixels, Point, Rgba, ScrollStrategy, SharedString, Task,
+    UniformListScrollHandle, Window, container_query, div, img, prelude::*, px, uniform_list,
 };
 
 use crate::{
+    file_actions,
     menu::{ContextMenu, Menu},
     settings::SettingsStore,
     theme::{Theme, theme},
@@ -211,13 +208,6 @@ impl Explorer {
         }
     }
 
-    fn copy_path(path: &Path, cx: &mut App) {
-        // Clipboards hold text, so a path that is not UTF-8 cannot be copied as is.
-        cx.write_to_clipboard(ClipboardItem::new_string(
-            path.to_string_lossy().into_owned(),
-        ));
-    }
-
     /// The size of the square that holds the icon of an entry, in logical
     /// pixels.
     fn icon_size(&self, cx: &App) -> f32 {
@@ -235,50 +225,23 @@ impl Explorer {
     /// Opens `path` with the command of the settings, without waiting for it
     /// to exit.
     fn open_externally(&mut self, path: &Path, cx: &mut Context<Self>) {
-        let open_command = self.open_command(cx);
-        let spawned = external_command(&open_command, path)
-            .and_then(|mut command| Ok(command.stdin(Stdio::null()).spawn()?));
-        match spawned {
-            Ok(mut child) => {
-                self.notice = None;
-                // Reap the process when it exits, which may take as long as the
-                // application stays open.
-                std::thread::spawn(move || child.wait());
-            }
-            Err(error) => {
-                let message = format!("Failed to run \"{open_command}\": {error:#}");
-                tracing::error!("{message}");
-                self.notice = Some(message.into());
-            }
-        }
+        let result = file_actions::open_externally(path, &self.open_command(cx));
+        self.notice = file_actions::notice(result);
         cx.notify();
     }
 
-    /// Copies the image to the clipboard in the background, with the command
-    /// of the system.
+    /// Copies the image to the clipboard in the background.
     fn copy_image(path: &Path, cx: &mut Context<Self>) {
-        let path = path.to_owned();
+        let task = file_actions::copy_image(path, cx);
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move {
-                    let png = png_for_clipboard(&path)?;
-                    let command = platform::clipboard_command(|name| std::env::var_os(name))
-                        .ok_or_else(|| eyre!("no Wayland or X11 display"))?;
-                    run_with_input(command, &png)
-                })
-                .await;
+            let result = task.await;
             // Fails only if the explorer is gone.
             let _ = this.update(cx, |this, cx| {
-                this.notice = result.err().map(|error| {
-                    let message = format!("Failed to copy the image: {error:#}");
-                    tracing::error!("{message}");
-                    message.into()
-                });
+                this.notice = file_actions::notice(result);
                 cx.notify();
             });
         })
         .detach();
-        cx.notify();
     }
 
     /// Opens the menu of an entry at `position`.
@@ -289,15 +252,9 @@ impl Explorer {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        let open_command = self.open_command(cx);
-        let program = open_command
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .to_owned();
         let this = cx.entity().downgrade();
         let menu = Menu::new(position)
-            .item(format!("Open with {program}"), {
+            .item(file_actions::open_with_label(&self.open_command(cx)), {
                 let this = this.clone();
                 let path = path.to_owned();
                 move |_, cx| {
@@ -312,7 +269,7 @@ impl Explorer {
             })
             .item("Copy path", {
                 let path = path.to_owned();
-                move |_, cx| Self::copy_path(&path, cx)
+                move |_, cx| file_actions::copy_path(&path, cx)
             });
         self.context_menu
             .update(cx, |context_menu, cx| context_menu.show(menu, cx));
@@ -619,16 +576,7 @@ impl Render for Explorer {
             )
             .child(self.render_toolbar(cx))
             .when_some(self.notice.clone(), |this, notice| {
-                this.child(
-                    div()
-                        .flex_shrink_0()
-                        .px_3()
-                        .py_1()
-                        .bg(theme(cx).error_background)
-                        .text_sm()
-                        .text_color(theme(cx).error_text)
-                        .child(notice),
-                )
+                this.child(file_actions::render_notice(notice, cx))
             })
             .child(div().flex_1().min_h_0().child(self.render_grid(cx)))
     }
