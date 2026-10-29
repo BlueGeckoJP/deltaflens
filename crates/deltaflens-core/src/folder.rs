@@ -145,8 +145,20 @@ mod tests {
     }
 
     #[test]
+    fn list_images_includes_avif_only_with_its_feature() {
+        let dir = TempDir::with_files("folder-avif", &["a.png", "b.avif"]);
+        let images = list_images(dir.path()).unwrap();
+        let expected: &[&str] = if cfg!(feature = "avif") {
+            &["a.png", "b.avif"]
+        } else {
+            &["a.png"]
+        };
+        assert_eq!(dir.names(&images), expected);
+    }
+
+    #[test]
     fn list_images_skips_unsupported_files_and_directories() {
-        let dir = TempDir::with_files("folder-unsupported", &["a.png", "notes.txt", "b.avif", "c"]);
+        let dir = TempDir::with_files("folder-unsupported", &["a.png", "notes.txt", "b.dds", "c"]);
         fs::create_dir(dir.path().join("folder.png")).unwrap();
         let images = list_images(dir.path()).unwrap();
         assert_eq!(dir.names(&images), ["a.png"]);
