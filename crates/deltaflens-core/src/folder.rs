@@ -5,7 +5,7 @@ use std::{
 
 use eyre::{Result, WrapErr};
 
-use crate::{explorer::is_hidden, is_supported_image};
+use crate::{is_supported_image, platform::is_hidden};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {

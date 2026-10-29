@@ -5,8 +5,8 @@ use std::{
 };
 
 use deltaflens_core::{
-    Entry, EntryKind, History, Sort, SortKey, SortOrder, clipboard_command, external_command,
-    list_entries, png_for_clipboard, run_with_input, sort_entries,
+    Entry, EntryKind, History, Sort, SortKey, SortOrder, external_command, list_entries, platform,
+    png_for_clipboard, run_with_input, sort_entries,
 };
 use eyre::eyre;
 use gpui::{
@@ -26,7 +26,7 @@ const ICON_SIZE: f32 = 128.;
 /// The space between the grid and the edges of the explorer.
 const GRID_PADDING: f32 = 8.;
 /// Opens an entry with its default application. Becomes a setting later.
-const OPEN_COMMAND: &str = "xdg-open <path>";
+const OPEN_COMMAND: &str = platform::DEFAULT_OPEN_COMMAND;
 
 /// An image being dragged from the explorer, to open it in a pane.
 pub struct DraggedImage {
@@ -225,8 +225,8 @@ impl Explorer {
         cx.notify();
     }
 
-    /// Copies the image to the clipboard in the background, with wl-copy or
-    /// xclip.
+    /// Copies the image to the clipboard in the background, with the command
+    /// of the system.
     fn copy_image(&mut self, path: &Path, cx: &mut Context<Self>) {
         self.context_menu = None;
         let path = path.to_owned();
@@ -234,7 +234,7 @@ impl Explorer {
             let result = cx
                 .background_spawn(async move {
                     let png = png_for_clipboard(&path)?;
-                    let command = clipboard_command(|name| std::env::var_os(name))
+                    let command = platform::clipboard_command(|name| std::env::var_os(name))
                         .ok_or_else(|| eyre!("no Wayland or X11 display"))?;
                     run_with_input(command, &png)
                 })

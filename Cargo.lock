@@ -1320,7 +1320,6 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "image",
- "libc",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1334,6 +1333,7 @@ dependencies = [
  "image",
  "jxl-oxide",
  "jxl-render",
+ "libc",
  "md-5",
  "moxcms",
  "natord",

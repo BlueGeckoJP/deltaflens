@@ -17,7 +17,10 @@ use std::{
 use eyre::{Result, WrapErr, bail};
 use md5::{Digest, Md5};
 
-use super::{DecodedImage, encode::encode_png, thumbnail};
+use crate::{
+    DecodedImage,
+    decode::{encode_png, thumbnail},
+};
 
 /// The size directories, smallest first, with the longest side of their
 /// thumbnails.
@@ -57,12 +60,7 @@ impl ThumbnailCache {
     /// `$XDG_CACHE_HOME/thumbnails`, or `~/.cache/thumbnails`.
     #[must_use]
     pub fn from_env() -> Option<Self> {
-        let cache = std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            // The XDG Base Directory Specification ignores relative paths.
-            .filter(|dir| dir.is_absolute())
-            .or_else(|| std::env::home_dir().map(|home| home.join(".cache")))?;
-        Some(Self::new(cache.join("thumbnails")))
+        Some(Self::new(super::cache_dir()?.join("thumbnails")))
     }
 
     /// Returns a thumbnail of `path` that fits in a `size` square, from the
@@ -195,11 +193,7 @@ fn read_thumbnail(cache_path: &Path, source: &Source) -> Result<Option<DecodedIm
         }
         png::ColorType::Indexed => bail!("palette left after expansion"),
     };
-    Ok(Some(DecodedImage {
-        width: frame.width,
-        height: frame.height,
-        pixels,
-    }))
+    Ok(Some(DecodedImage::new(frame.width, frame.height, pixels)))
 }
 
 /// Whether the text chunks of a thumbnail say that it is of `source`. The

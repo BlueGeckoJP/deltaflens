@@ -2,7 +2,6 @@ mod color;
 mod encode;
 mod jxl;
 mod thumbnail;
-mod thumbnail_cache;
 
 use std::path::Path;
 
@@ -10,8 +9,8 @@ use eyre::{Result, WrapErr};
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
 
 use self::color::{convert_to_srgb, describes_srgb};
+pub use self::thumbnail::thumbnail;
 pub(crate) use self::{encode::encode_png, thumbnail::fit_within};
-pub use self::{thumbnail::thumbnail, thumbnail_cache::ThumbnailCache};
 
 /// The most memory the pixels of a decoded image may take: 4 GiB, a
 /// 32768 x 32768 image in BGRA. The default of `image`, 512 MiB, stops at about

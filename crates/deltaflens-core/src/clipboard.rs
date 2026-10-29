@@ -1,8 +1,8 @@
-//! Copying images to the clipboard with wl-copy or xclip, as gpui writes only
-//! text to the clipboard on Linux.
+//! Copying images to the clipboard with a command of the system, as gpui
+//! writes only text to the clipboard on Linux. The command is
+//! [`crate::platform::clipboard_command`].
 
 use std::{
-    ffi::OsString,
     fs::{self, File},
     io::{ErrorKind, Read, Write},
     path::Path,
@@ -38,29 +38,11 @@ pub fn png_for_clipboard(path: &Path) -> Result<Vec<u8>> {
     Ok(png)
 }
 
-/// The command that puts PNG data from its standard input on the clipboard:
-/// wl-copy on Wayland, or else xclip on X11. `None` if there is neither.
-///
-/// `var` reads an environment variable, like [`std::env::var_os`].
-pub fn clipboard_command(var: impl Fn(&str) -> Option<OsString>) -> Option<Command> {
-    let is_set = |name| var(name).is_some_and(|value| !value.is_empty());
-    if is_set("WAYLAND_DISPLAY") {
-        let mut command = Command::new("wl-copy");
-        command.args(["--type", "image/png"]);
-        Some(command)
-    } else if is_set("DISPLAY") {
-        let mut command = Command::new("xclip");
-        command.args(["-selection", "clipboard", "-target", "image/png", "-in"]);
-        Some(command)
-    } else {
-        None
-    }
-}
-
 /// Runs `command` with `input` as its standard input and waits for it.
 ///
-/// wl-copy and xclip leave a process behind that serves the clipboard, so its
-/// output is not captured: reading it would wait for that process too.
+/// Clipboard commands such as wl-copy and xclip leave a process behind that
+/// serves the clipboard, so its output is not captured: reading it would wait
+/// for that process too.
 ///
 /// # Errors
 ///
@@ -107,25 +89,6 @@ mod tests {
             .join(name)
     }
 
-    fn env(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
-        let vars: Vec<(String, OsString)> = vars
-            .iter()
-            .map(|(name, value)| ((*name).to_owned(), OsString::from(value)))
-            .collect();
-        move |name| {
-            vars.iter()
-                .find(|(var, _)| var == name)
-                .map(|(_, value)| value.clone())
-        }
-    }
-
-    fn program_and_args(command: &Command) -> Vec<String> {
-        std::iter::once(command.get_program())
-            .chain(command.get_args())
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect()
-    }
-
     #[test]
     fn png_file_is_copied_as_is() {
         let path = fixture("red-3x2.png");
@@ -145,38 +108,6 @@ mod tests {
     fn short_file_is_not_taken_for_png() {
         let dir = TempDir::with_files("clipboard-short", &["empty.png"]);
         assert!(png_for_clipboard(&dir.path().join("empty.png")).is_err());
-    }
-
-    #[test]
-    fn wayland_uses_wl_copy() {
-        let command =
-            clipboard_command(env(&[("WAYLAND_DISPLAY", "wayland-0"), ("DISPLAY", ":0")])).unwrap();
-        assert_eq!(
-            program_and_args(&command),
-            ["wl-copy", "--type", "image/png"]
-        );
-    }
-
-    #[test]
-    fn x11_uses_xclip() {
-        let command =
-            clipboard_command(env(&[("WAYLAND_DISPLAY", ""), ("DISPLAY", ":0")])).unwrap();
-        assert_eq!(
-            program_and_args(&command),
-            [
-                "xclip",
-                "-selection",
-                "clipboard",
-                "-target",
-                "image/png",
-                "-in"
-            ]
-        );
-    }
-
-    #[test]
-    fn no_display_has_no_command() {
-        assert!(clipboard_command(env(&[])).is_none());
     }
 
     #[test]

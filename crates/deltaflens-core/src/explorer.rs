@@ -1,14 +1,13 @@
 //! The contents of a folder, as the explorer lists them.
 
 use std::{
-    ffi::OsStr,
     path::{Path, PathBuf},
     time::SystemTime,
 };
 
 use eyre::{Result, WrapErr};
 
-use crate::{folder::compare_names, is_supported_image};
+use crate::{folder::compare_names, is_supported_image, platform};
 
 /// Folders are sorted before images.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -61,7 +60,7 @@ fn list_entries_inner(dir: &Path) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
     for entry in dir.read_dir()? {
         let path = entry?.path();
-        if is_hidden(&path) {
+        if platform::is_hidden(&path) {
             continue;
         }
         // `metadata` follows symbolic links. Entries it fails on, such as broken
@@ -83,13 +82,6 @@ fn list_entries_inner(dir: &Path) -> Result<Vec<Entry>> {
         });
     }
     Ok(entries)
-}
-
-/// Returns whether the name of `path` starts with a dot.
-pub(crate) fn is_hidden(path: &Path) -> bool {
-    path.file_name()
-        .and_then(OsStr::to_str)
-        .is_some_and(|name| name.starts_with('.'))
 }
 
 /// Sorts `entries` by `sort`, with folders first in either order.

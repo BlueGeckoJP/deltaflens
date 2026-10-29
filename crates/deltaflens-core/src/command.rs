@@ -98,6 +98,8 @@ mod tests {
         );
     }
 
+    // Only Unix paths can be any bytes.
+    #[cfg(unix)]
     #[test]
     fn non_utf8_path_is_kept() {
         use std::os::unix::ffi::OsStrExt;
