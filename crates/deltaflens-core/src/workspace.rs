@@ -154,6 +154,14 @@ impl Workspace {
         None
     }
 
+    /// Whether [`Self::reopen_closed_tab`] would reopen a tab.
+    #[must_use]
+    pub fn can_reopen_closed_tab(&self, exists: impl Fn(&TabContent) -> bool) -> bool {
+        self.closed_tabs
+            .iter()
+            .any(|closed| exists(&closed.content))
+    }
+
     /// See [`Layout::move_boundary`].
     ///
     /// # Errors
@@ -1040,6 +1048,19 @@ mod tests {
         workspace.reopen_closed_tab(exists).unwrap();
         assert_eq!(contents(&workspace, first), [viewer("a.jxl")]);
         assert_eq!(workspace.reopen_closed_tab(exists), None);
+    }
+
+    #[test]
+    fn can_reopen_only_tabs_whose_file_is_there() {
+        let mut workspace = Workspace::new();
+        let first = workspace.focused_pane();
+        assert!(!workspace.can_reopen_closed_tab(always));
+
+        let a = workspace.open_tab(first, viewer("gone.jxl")).unwrap();
+        workspace.close_tab(first, a).unwrap();
+        let exists = |content: &TabContent| *content != viewer("gone.jxl");
+        assert!(workspace.can_reopen_closed_tab(always));
+        assert!(!workspace.can_reopen_closed_tab(exists));
     }
 
     #[test]

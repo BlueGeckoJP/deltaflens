@@ -836,34 +836,65 @@ impl WorkspaceView {
         }
     }
 
-    /// Opens the menu of a tab at `position`.
+    /// Opens the menu of a tab at `position`. Its actions apply to the tab,
+    /// which is activated first.
     fn show_tab_menu(
         &mut self,
         pane_id: PaneId,
         tab_id: TabId,
         position: Point<Pixels>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) {
         let this = cx.entity().downgrade();
-        // The split copies the tab the menu was opened on.
-        let split = {
+        let activate = {
             let this = this.clone();
-            move |axis| {
-                let this = this.clone();
-                move |window: &mut Window, cx: &mut gpui::App| {
-                    let _ = this.update(cx, |this, cx| {
-                        this.activate_tab(pane_id, tab_id, cx);
-                        this.split(axis, window, cx);
-                    });
-                }
+            move |_: &mut Window, cx: &mut gpui::App| {
+                let _ = this.update(cx, |this, cx| this.activate_tab(pane_id, tab_id, cx));
             }
         };
         let close = move |_: &mut Window, cx: &mut gpui::App| {
             let _ = this.update(cx, |this, cx| this.close_tab(pane_id, tab_id, cx));
         };
+        let layout = self.workspace.layout();
+        let has_neighbor = |side| layout.neighbor(pane_id, side).is_some();
         let menu = Menu::new(position)
-            .item("Split right", split(Axis::Horizontal))
-            .item("Split down", split(Axis::Vertical))
+            .before_actions(activate)
+            .action("Split right", SplitRight, true, window)
+            .action("Split down", SplitDown, true, window)
+            .separator()
+            .action(
+                "Swap with left pane",
+                SwapPaneLeft,
+                has_neighbor(Side::Left),
+                window,
+            )
+            .action(
+                "Swap with right pane",
+                SwapPaneRight,
+                has_neighbor(Side::Right),
+                window,
+            )
+            .action(
+                "Swap with pane above",
+                SwapPaneUp,
+                has_neighbor(Side::Up),
+                window,
+            )
+            .action(
+                "Swap with pane below",
+                SwapPaneDown,
+                has_neighbor(Side::Down),
+                window,
+            )
+            .separator()
+            .action(
+                "Reopen closed tab",
+                ReopenClosedTab,
+                self.workspace.can_reopen_closed_tab(tab_exists),
+                window,
+            )
+            .separator()
             .item("Close tab", close);
         self.context_menu
             .update(cx, |context_menu, cx| context_menu.show(menu, cx));
@@ -1308,8 +1339,8 @@ impl WorkspaceView {
             )
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    this.show_tab_menu(pane_id, tab_id, event.position, cx);
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.show_tab_menu(pane_id, tab_id, event.position, window, cx);
                 }),
             )
             .on_mouse_up(
