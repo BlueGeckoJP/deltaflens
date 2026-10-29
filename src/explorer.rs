@@ -18,6 +18,7 @@ use crate::{
     settings::SettingsStore,
     theme::{Theme, theme},
     thumbnails::{ThumbnailKey, Thumbnails},
+    workspace_view::{GoBack, GoForward, GoUp, NewTab},
 };
 
 /// How much wider and taller a grid cell, including its padding and the name
@@ -271,6 +272,20 @@ impl Explorer {
                 let path = path.to_owned();
                 move |_, cx| file_actions::copy_path(&path, cx)
             });
+        self.context_menu
+            .update(cx, |context_menu, cx| context_menu.show(menu, cx));
+    }
+
+    /// Opens the menu of the folder at `position`, from the part of the grid
+    /// without entries. Its actions apply to the active tab of the focused
+    /// pane, which pressing the pane made this one.
+    fn show_folder_menu(&self, position: Point<Pixels>, window: &Window, cx: &mut Context<Self>) {
+        let menu = Menu::new(position)
+            .action("Back", GoBack, self.history.can_go_back(), window)
+            .action("Forward", GoForward, self.history.can_go_forward(), window)
+            .action("Up", GoUp, self.dir().parent().is_some(), window)
+            .separator()
+            .action("New tab", NewTab, true, window);
         self.context_menu
             .update(cx, |context_menu, cx| context_menu.show(menu, cx));
     }
@@ -554,6 +569,8 @@ impl Explorer {
                 let path = entry.path.clone();
                 let kind = entry.kind;
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    // Not the menu of the folder, which the grid opens.
+                    cx.stop_propagation();
                     this.show_entry_menu(&path, kind, event.position, cx);
                 })
             })
@@ -578,7 +595,18 @@ impl Render for Explorer {
             .when_some(self.notice.clone(), |this, notice| {
                 this.child(file_actions::render_notice(notice, cx))
             })
-            .child(div().flex_1().min_h_0().child(self.render_grid(cx)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            this.show_folder_menu(event.position, window, cx);
+                        }),
+                    )
+                    .child(self.render_grid(cx)),
+            )
     }
 }
 
