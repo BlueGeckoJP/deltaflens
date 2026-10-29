@@ -1274,6 +1274,7 @@ dependencies = [
  "image",
  "jxl-oxide",
  "md-5",
+ "moxcms",
  "natord",
  "png 0.18.1",
  "tracing",

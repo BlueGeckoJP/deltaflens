@@ -7,7 +7,7 @@ use jxl_oxide::{
     EnumColourEncoding, JxlImage, PixelFormat, RenderingIntent, color::ColourEncoding,
 };
 
-use super::{DecodedImage, limits};
+use super::{DecodedImage, convert_to_srgb, limits};
 
 /// A bare JPEG XL codestream.
 const CODESTREAM_SIGNATURE: [u8; 2] = [0xff, 0x0a];
@@ -26,9 +26,6 @@ pub(super) fn is_jxl(path: &Path) -> Result<bool> {
 }
 
 /// Decodes the first frame in sRGB, with the orientation applied.
-///
-/// Images whose color space is given by an embedded ICC profile are left in
-/// that color space, because converting them needs a color management system.
 pub(super) fn decode(path: &Path) -> Result<DecodedImage> {
     let mut image = JxlImage::builder()
         .open(path)
@@ -37,7 +34,10 @@ pub(super) fn decode(path: &Path) -> Result<DecodedImage> {
         bail!("the file is truncated");
     }
     let metadata = &image.image_header().metadata;
-    match metadata.colour_encoding {
+    // A color space given by an ICC profile is converted afterwards, as for
+    // the other formats. Converting it with the moxcms support of jxl-oxide
+    // gave wrong colors.
+    let icc = match metadata.colour_encoding {
         ColourEncoding::Enum(_) => {
             let srgb = if metadata.grayscale() {
                 EnumColourEncoding::gray_srgb(RenderingIntent::Relative)
@@ -45,14 +45,10 @@ pub(super) fn decode(path: &Path) -> Result<DecodedImage> {
                 EnumColourEncoding::srgb(RenderingIntent::Relative)
             };
             image.request_color_encoding(srgb);
+            None
         }
-        ColourEncoding::IccProfile(_) => {
-            tracing::warn!(
-                "{}: colors are not converted to sRGB, as the color space is an ICC profile",
-                path.display()
-            );
-        }
-    }
+        ColourEncoding::IccProfile(_) => image.original_icc().map(<[u8]>::to_vec),
+    };
 
     let format = image.pixel_format();
     if matches!(format, PixelFormat::Cmyk | PixelFormat::Cmyka) {
@@ -67,7 +63,7 @@ pub(super) fn decode(path: &Path) -> Result<DecodedImage> {
     let mut samples = vec![0u8; width as usize * height as usize * channels];
     stream.write_to_buffer(&mut samples);
 
-    let pixels = match channels {
+    let mut pixels: Vec<u8> = match channels {
         1 => samples.iter().flat_map(|&v| [v, v, v, u8::MAX]).collect(),
         2 => samples
             .as_chunks::<2>()
@@ -79,16 +75,22 @@ pub(super) fn decode(path: &Path) -> Result<DecodedImage> {
             .as_chunks::<3>()
             .0
             .iter()
-            .flat_map(|&[r, g, b]| [b, g, r, u8::MAX])
+            .flat_map(|&[r, g, b]| [r, g, b, u8::MAX])
             .collect(),
-        4 => {
-            for pixel in samples.as_chunks_mut::<4>().0 {
-                pixel.swap(0, 2);
-            }
-            samples
-        }
+        4 => samples,
         _ => bail!("unexpected number of channels: {channels}"),
     };
+    if let Some(icc) = icc
+        && let Err(error) = convert_to_srgb(&mut pixels, &icc)
+    {
+        tracing::warn!(
+            "{}: colors are not converted to sRGB: {error:#}",
+            path.display()
+        );
+    }
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
     Ok(DecodedImage {
         width,
         height,

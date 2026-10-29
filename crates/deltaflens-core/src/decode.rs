@@ -1,3 +1,4 @@
+mod color;
 mod encode;
 mod jxl;
 mod thumbnail;
@@ -8,6 +9,7 @@ use std::path::Path;
 use eyre::{Result, WrapErr};
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
 
+use self::color::convert_to_srgb;
 pub(crate) use self::{encode::encode_png, thumbnail::fit_within};
 pub use self::{thumbnail::thumbnail, thumbnail_cache::ThumbnailCache};
 
@@ -70,8 +72,8 @@ impl DecodedImage {
 ///
 /// The orientation is applied, images with more than 8 bits per channel are
 /// converted to 8 bits, and only the first frame of an animation is decoded.
-/// JPEG XL images are converted to sRGB, unless their color space is given by
-/// an ICC profile.
+/// Images are converted to sRGB from the color space of their ICC profile,
+/// or of the color encoding of JPEG XL.
 ///
 /// # Errors
 ///
@@ -91,10 +93,25 @@ fn decode_inner(path: &Path) -> Result<DecodedImage> {
     // `ImageReader::decode` checks this, but `into_decoder` does not.
     limits().reserve(decoder.total_bytes())?;
     let orientation = decoder.orientation()?;
+    let icc = decoder.icc_profile().unwrap_or_else(|error| {
+        tracing::warn!(
+            "{}: failed to read the ICC profile: {error}",
+            path.display()
+        );
+        None
+    });
     let mut image = DynamicImage::from_decoder(decoder)?;
     image.apply_orientation(orientation);
 
     let mut buffer = image.into_rgba8();
+    if let Some(icc) = icc
+        && let Err(error) = convert_to_srgb(&mut buffer, &icc)
+    {
+        tracing::warn!(
+            "{}: colors are not converted to sRGB: {error:#}",
+            path.display()
+        );
+    }
     for pixel in buffer.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
@@ -208,6 +225,17 @@ mod tests {
     fn decode_detects_jxl_from_contents() {
         let image = decode(&fixture("jxl-named.png")).unwrap();
         assert_eq!(image.into_pixels(), RED.repeat(6));
+    }
+
+    #[test]
+    fn decode_converts_icc_profiles_to_srgb() {
+        // Each holds the red of sRGB in Display P3, with a Display P3 profile.
+        for name in ["p3-red-8x8.png", "p3-red-8x8.jpg", "p3-red-8x8.jxl"] {
+            let image = decode(&fixture(name)).unwrap();
+            for &pixel in image.pixels().as_chunks::<4>().0 {
+                assert_close(pixel, RED);
+            }
+        }
     }
 
     #[test]

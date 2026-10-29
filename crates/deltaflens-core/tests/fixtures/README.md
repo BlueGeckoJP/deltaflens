@@ -53,3 +53,32 @@ write("gray-2x2.jxl", &[0, 255].repeat(2), 2, 2, ColorSpace::Luma);
 cp red-3x2.jxl jxl-named.png
 head -c 20 red-3x2.jxl > truncated.jxl
 ```
+
+The fixtures with a Display P3 profile hold the red of sRGB in Display P3,
+(234, 51, 35). They are made with `image` 0.25, `moxcms` 0.8 and `jpegxl-rs`
+0.16 (libjxl 0.12, built from source with its `vendored` feature). The JPEG
+XL file is the JPEG recompressed losslessly, which keeps its ICC profile:
+
+```rust
+use std::io::Cursor;
+
+use image::{ExtendedColorType, ImageEncoder, codecs::{jpeg::JpegEncoder, png::PngEncoder}};
+
+let icc = moxcms::ColorProfile::new_display_p3().encode().unwrap();
+let pixels = [234u8, 51, 35].repeat(64);
+
+let mut jpeg = Vec::new();
+let mut encoder = JpegEncoder::new_with_quality(Cursor::new(&mut jpeg), 100);
+encoder.set_icc_profile(icc.clone()).unwrap();
+encoder.write_image(&pixels, 8, 8, ExtendedColorType::Rgb8).unwrap();
+std::fs::write("p3-red-8x8.jpg", &jpeg).unwrap();
+
+let jxl = jpegxl_rs::encode::encoder_builder().build().unwrap().encode_jpeg(&jpeg).unwrap();
+std::fs::write("p3-red-8x8.jxl", jxl).unwrap();
+
+let mut png = Vec::new();
+let mut encoder = PngEncoder::new(Cursor::new(&mut png));
+encoder.set_icc_profile(icc).unwrap();
+encoder.write_image(&pixels, 8, 8, ExtendedColorType::Rgb8).unwrap();
+std::fs::write("p3-red-8x8.png", png).unwrap();
+```

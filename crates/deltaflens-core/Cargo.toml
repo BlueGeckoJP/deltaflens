@@ -28,6 +28,9 @@ image = { version = "0.25", default-features = false, features = [
 # Lanczos3 resizing with SIMD, several times faster than `image::imageops`.
 fast_image_resize = { version = "6", features = ["only_u8x4"] }
 jxl-oxide = "0.12"
+# Converts images with ICC profiles to sRGB. Written in Rust, without system
+# libraries. The same version as image uses.
+moxcms = "0.8"
 # For the file names of the freedesktop thumbnail cache.
 md-5 = "0.10"
 natord = "1.0"
