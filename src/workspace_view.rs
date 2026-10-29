@@ -10,14 +10,15 @@ use deltaflens_core::{
 use eyre::{Result, eyre};
 use gpui::{
     AnyElement, Bounds, ClickEvent, Context, CursorStyle, DragMoveEvent, ElementId, Entity,
-    FocusHandle, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions,
-    Pixels, Point, Rgba, SharedString, Window, actions, anchored, deferred, div, prelude::*, px,
+    FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    PathPromptOptions, Pixels, Point, Rgba, SharedString, Window, actions, div, prelude::*, px,
     relative,
 };
 
 use crate::{
     explorer::{DraggedImage, Explorer, ExplorerEvent},
     images::Images,
+    menu::{ContextMenu, Menu},
     settings::SettingsStore,
     settings_view::SettingsView,
     theme::{Theme, theme},
@@ -118,13 +119,6 @@ struct TabLook {
     round_top_left: bool,
 }
 
-/// The menu opened by right-clicking a tab.
-struct TabMenu {
-    pane_id: PaneId,
-    tab_id: TabId,
-    position: Point<Pixels>,
-}
-
 /// What the tab bar of a pane at the top edge of the window does as part of
 /// the title bar, when the app draws the window frame. Its empty part moves
 /// the window.
@@ -169,7 +163,7 @@ pub struct WorkspaceView {
     /// moving when the mouse moves, so that a double click still reaches the
     /// tab bar.
     move_pending: bool,
-    tab_menu: Option<TabMenu>,
+    context_menu: Entity<ContextMenu>,
     /// Where a tab or image dragged over a pane would go.
     drop_target: Option<(PaneId, DropZone)>,
     /// The session last saved or tried to, to save it again only when it
@@ -209,7 +203,7 @@ impl WorkspaceView {
             focus_handle,
             title: APP_NAME.to_owned(),
             move_pending: false,
-            tab_menu: None,
+            context_menu: cx.new(|_| ContextMenu::default()),
             drop_target: None,
             saved_session: None,
         }
@@ -353,7 +347,9 @@ impl WorkspaceView {
             TabContent::Explorer { dir } => {
                 let thumbnails = self.thumbnails.clone();
                 let settings = self.settings.clone();
-                let explorer = cx.new(|cx| Explorer::new(dir, thumbnails, settings, cx));
+                let context_menu = self.context_menu.clone();
+                let explorer =
+                    cx.new(|cx| Explorer::new(dir, thumbnails, settings, context_menu, cx));
                 cx.subscribe_in(&explorer, window, move |this, _, event, window, cx| {
                     this.on_explorer_event(tab_id, event, window, cx);
                 })
@@ -725,7 +721,6 @@ impl WorkspaceView {
 
     /// Splits the focused pane, copying its active tab into the new pane.
     fn split(&mut self, axis: Axis, window: &mut Window, cx: &mut Context<Self>) {
-        self.tab_menu = None;
         if let Err(error) = self
             .workspace
             .split_pane(self.workspace.focused_pane(), axis)
@@ -836,53 +831,37 @@ impl WorkspaceView {
         }
     }
 
-    fn render_tab_menu(menu: &TabMenu, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = theme(cx);
-        let item = |id: &'static str, label: &'static str| {
-            div()
-                .id(id)
-                .px_3()
-                .py_1()
-                .rounded_sm()
-                .hover(move |style| style.bg(theme.element_hover))
-                .child(label)
-        };
-        let (pane_id, tab_id) = (menu.pane_id, menu.tab_id);
+    /// Opens the menu of a tab at `position`.
+    fn show_tab_menu(
+        &mut self,
+        pane_id: PaneId,
+        tab_id: TabId,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let this = cx.entity().downgrade();
         // The split copies the tab the menu was opened on.
-        let split_right = cx.listener(move |this, _: &ClickEvent, window, cx| {
-            this.activate_tab(pane_id, tab_id, cx);
-            this.split(Axis::Horizontal, window, cx);
-        });
-        let split_down = cx.listener(move |this, _: &ClickEvent, window, cx| {
-            this.activate_tab(pane_id, tab_id, cx);
-            this.split(Axis::Vertical, window, cx);
-        });
-        div()
-            .flex()
-            .flex_col()
-            .min_w(px(160.))
-            .p_1()
-            .rounded_md()
-            .border_1()
-            .border_color(theme.menu_border)
-            .bg(theme.menu)
-            .text_sm()
-            .text_color(theme.text)
-            .shadow_md()
-            // Keep clicks on the menu from reaching the tabs under it.
-            .occlude()
-            .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                this.tab_menu = None;
-                cx.notify();
-            }))
-            .child(item("split-right", "Split right").on_click(split_right))
-            .child(item("split-down", "Split down").on_click(split_down))
-            .child(item("close-tab", "Close tab").on_click(cx.listener(
-                move |this, _: &ClickEvent, _, cx| {
-                    this.tab_menu = None;
-                    this.close_tab(pane_id, tab_id, cx);
-                },
-            )))
+        let split = {
+            let this = this.clone();
+            move |axis| {
+                let this = this.clone();
+                move |window: &mut Window, cx: &mut gpui::App| {
+                    let _ = this.update(cx, |this, cx| {
+                        this.activate_tab(pane_id, tab_id, cx);
+                        this.split(axis, window, cx);
+                    });
+                }
+            }
+        };
+        let close = move |_: &mut Window, cx: &mut gpui::App| {
+            let _ = this.update(cx, |this, cx| this.close_tab(pane_id, tab_id, cx));
+        };
+        let menu = Menu::new(position)
+            .item("Split right", split(Axis::Horizontal))
+            .item("Split down", split(Axis::Vertical))
+            .item("Close tab", close);
+        self.context_menu
+            .update(cx, |context_menu, cx| context_menu.show(menu, cx));
     }
 
     /// Reopens the most recently closed tab, skipping those whose file or
@@ -1325,12 +1304,7 @@ impl WorkspaceView {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    this.tab_menu = Some(TabMenu {
-                        pane_id,
-                        tab_id,
-                        position: event.position,
-                    });
-                    cx.notify();
+                    this.show_tab_menu(pane_id, tab_id, event.position, cx);
                 }),
             )
             .on_mouse_up(
@@ -1470,6 +1444,13 @@ impl Render for WorkspaceView {
         let content = div()
             .size_full()
             .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape"
+                    && this.context_menu.update(cx, ContextMenu::dismiss)
+                {
+                    cx.stop_propagation();
+                }
+            }))
             .on_action(cx.listener(Self::open))
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::close_active_tab))
@@ -1508,17 +1489,7 @@ impl Render for WorkspaceView {
                 cx,
             )))
             .children(self.render_settings_errors(cx))
-            .when_some(self.tab_menu.as_ref(), |this, menu| {
-                this.child(
-                    deferred(
-                        anchored()
-                            .position(menu.position)
-                            .snap_to_window()
-                            .child(Self::render_tab_menu(menu, cx)),
-                    )
-                    .with_priority(1),
-                )
-            });
+            .child(self.context_menu.clone());
         window_frame::window_frame(content, window, cx)
     }
 }

@@ -1,5 +1,6 @@
 mod explorer;
 mod images;
+mod menu;
 mod render_image;
 mod settings;
 mod settings_view;
