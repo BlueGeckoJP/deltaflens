@@ -1,25 +1,24 @@
 use std::{
     ops::Range,
     path::{Path, PathBuf},
-    process::Stdio,
 };
 
 use deltaflens_core::{
-    Entry, EntryKind, History, Sort, SortKey, SortOrder, external_command, list_entries, platform,
-    png_for_clipboard, run_with_input, sort_entries,
+    Entry, EntryKind, History, Sort, SortKey, SortOrder, list_entries, sort_entries,
 };
-use eyre::eyre;
 use gpui::{
-    AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, MouseButton,
-    MouseDownEvent, NavigationDirection, ObjectFit, Pixels, Point, Rgba, ScrollStrategy,
-    SharedString, Task, UniformListScrollHandle, Window, anchored, container_query, deferred, div,
-    img, prelude::*, px, uniform_list,
+    AnyElement, App, ClickEvent, Context, Entity, EventEmitter, MouseButton, MouseDownEvent,
+    NavigationDirection, ObjectFit, Pixels, Point, Rgba, ScrollStrategy, SharedString, Task,
+    UniformListScrollHandle, Window, container_query, div, img, prelude::*, px, uniform_list,
 };
 
 use crate::{
+    file_actions,
+    menu::{ContextMenu, Menu},
     settings::SettingsStore,
     theme::{Theme, theme},
     thumbnails::{ThumbnailKey, Thumbnails},
+    workspace_view::{GoBack, GoForward, GoUp, NewTab},
 };
 
 /// How much wider and taller a grid cell, including its padding and the name
@@ -75,17 +74,9 @@ pub struct Explorer {
     settings: Entity<SettingsStore>,
     /// Whether hidden entries are listed, as last read from the settings.
     show_hidden: bool,
-    context_menu: Option<ContextMenu>,
+    context_menu: Entity<ContextMenu>,
     /// The error of the last action from the context menu.
     notice: Option<SharedString>,
-}
-
-/// The menu shown by right-clicking an entry.
-struct ContextMenu {
-    path: PathBuf,
-    kind: EntryKind,
-    /// In window coordinates.
-    position: Point<Pixels>,
 }
 
 impl EventEmitter<ExplorerEvent> for Explorer {}
@@ -95,6 +86,7 @@ impl Explorer {
         dir: PathBuf,
         thumbnails: Entity<Thumbnails>,
         settings: Entity<SettingsStore>,
+        context_menu: Entity<ContextMenu>,
         cx: &mut Context<Self>,
     ) -> Self {
         // Redraw when a thumbnail is ready.
@@ -119,7 +111,7 @@ impl Explorer {
             thumbnails,
             settings,
             show_hidden,
-            context_menu: None,
+            context_menu,
             notice: None,
         };
         this.load(cx);
@@ -156,7 +148,6 @@ impl Explorer {
     }
 
     fn on_navigated(&mut self, cx: &mut Context<Self>) {
-        self.context_menu = None;
         self.notice = None;
         cx.emit(ExplorerEvent::Navigated(self.dir().to_owned()));
         let dir = self.dir().to_owned();
@@ -218,15 +209,6 @@ impl Explorer {
         }
     }
 
-    fn copy_path(&mut self, path: &Path, cx: &mut Context<Self>) {
-        self.context_menu = None;
-        // Clipboards hold text, so a path that is not UTF-8 cannot be copied as is.
-        cx.write_to_clipboard(ClipboardItem::new_string(
-            path.to_string_lossy().into_owned(),
-        ));
-        cx.notify();
-    }
-
     /// The size of the square that holds the icon of an entry, in logical
     /// pixels.
     fn icon_size(&self, cx: &App) -> f32 {
@@ -244,114 +226,68 @@ impl Explorer {
     /// Opens `path` with the command of the settings, without waiting for it
     /// to exit.
     fn open_externally(&mut self, path: &Path, cx: &mut Context<Self>) {
-        self.context_menu = None;
-        let open_command = self.open_command(cx);
-        let spawned = external_command(&open_command, path)
-            .and_then(|mut command| Ok(command.stdin(Stdio::null()).spawn()?));
-        match spawned {
-            Ok(mut child) => {
-                self.notice = None;
-                // Reap the process when it exits, which may take as long as the
-                // application stays open.
-                std::thread::spawn(move || child.wait());
-            }
-            Err(error) => {
-                let message = format!("Failed to run \"{open_command}\": {error:#}");
-                tracing::error!("{message}");
-                self.notice = Some(message.into());
-            }
-        }
+        let result = file_actions::open_externally(path, &self.open_command(cx));
+        self.notice = file_actions::notice(result);
         cx.notify();
     }
 
-    /// Copies the image to the clipboard in the background, with the command
-    /// of the system.
-    fn copy_image(&mut self, path: &Path, cx: &mut Context<Self>) {
-        self.context_menu = None;
-        let path = path.to_owned();
+    /// Copies the image to the clipboard in the background.
+    fn copy_image(path: &Path, cx: &mut Context<Self>) {
+        let task = file_actions::copy_image(path, cx);
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move {
-                    let png = png_for_clipboard(&path)?;
-                    let command = platform::clipboard_command(|name| std::env::var_os(name))
-                        .ok_or_else(|| eyre!("no Wayland or X11 display"))?;
-                    run_with_input(command, &png)
-                })
-                .await;
+            let result = task.await;
             // Fails only if the explorer is gone.
             let _ = this.update(cx, |this, cx| {
-                this.notice = result.err().map(|error| {
-                    let message = format!("Failed to copy the image: {error:#}");
-                    tracing::error!("{message}");
-                    message.into()
-                });
+                this.notice = file_actions::notice(result);
                 cx.notify();
             });
         })
         .detach();
-        cx.notify();
     }
 
-    /// The menu of an entry. `open_command` opens it with another
-    /// application.
-    fn render_context_menu(
-        menu: &ContextMenu,
-        open_command: &str,
+    /// Opens the menu of an entry at `position`.
+    fn show_entry_menu(
+        &self,
+        path: &Path,
+        kind: EntryKind,
+        position: Point<Pixels>,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let program = open_command
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .to_owned();
-        let theme = theme(cx);
-        let item = |id: &'static str, label: String| {
-            div()
-                .id(id)
-                .px_3()
-                .py_1()
-                .rounded_sm()
-                .hover(move |style| style.bg(theme.element_hover))
-                .child(label)
-        };
-        let open_path = menu.path.clone();
-        let copy_path = menu.path.clone();
-        let image_path = menu.path.clone();
-        div()
-            .flex()
-            .flex_col()
-            .min_w(px(180.))
-            .p_1()
-            .rounded_md()
-            .border_1()
-            .border_color(theme.menu_border)
-            .bg(theme.menu)
-            .text_sm()
-            .text_color(theme.text)
-            .shadow_md()
-            // Keep clicks on the menu from reaching the entries under it.
-            .occlude()
-            .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                this.context_menu = None;
-                cx.notify();
-            }))
-            .child(
-                item("open-externally", format!("Open with {program}")).on_click(cx.listener(
-                    move |this, _: &ClickEvent, _, cx| this.open_externally(&open_path, cx),
-                )),
-            )
-            .when(menu.kind == EntryKind::Image, |this| {
-                this.child(
-                    item("copy-image", "Copy image".to_owned()).on_click(cx.listener(
-                        move |this, _: &ClickEvent, _, cx| {
-                            this.copy_image(&image_path, cx);
-                        },
-                    )),
-                )
+    ) {
+        let this = cx.entity().downgrade();
+        let menu = Menu::new(position)
+            .item(file_actions::open_with_label(&self.open_command(cx)), {
+                let this = this.clone();
+                let path = path.to_owned();
+                move |_, cx| {
+                    let _ = this.update(cx, |this, cx| this.open_externally(&path, cx));
+                }
             })
-            .child(item("copy-path", "Copy path".to_owned()).on_click(
-                cx.listener(move |this, _: &ClickEvent, _, cx| this.copy_path(&copy_path, cx)),
-            ))
+            .when(kind == EntryKind::Image, |menu| {
+                let path = path.to_owned();
+                menu.item("Copy image", move |_, cx| {
+                    let _ = this.update(cx, |_, cx| Self::copy_image(&path, cx));
+                })
+            })
+            .item("Copy path", {
+                let path = path.to_owned();
+                move |_, cx| file_actions::copy_path(&path, cx)
+            });
+        self.context_menu
+            .update(cx, |context_menu, cx| context_menu.show(menu, cx));
+    }
+
+    /// Opens the menu of the folder at `position`, from the part of the grid
+    /// without entries. Its actions apply to the active tab of the focused
+    /// pane, which pressing the pane made this one.
+    fn show_folder_menu(&self, position: Point<Pixels>, window: &Window, cx: &mut Context<Self>) {
+        let menu = Menu::new(position)
+            .action("Back", GoBack, self.history.can_go_back(), window)
+            .action("Forward", GoForward, self.history.can_go_forward(), window)
+            .action("Up", GoUp, self.dir().parent().is_some(), window)
+            .separator()
+            .action("New tab", NewTab, true, window);
+        self.context_menu
+            .update(cx, |context_menu, cx| context_menu.show(menu, cx));
     }
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -633,12 +569,9 @@ impl Explorer {
                 let path = entry.path.clone();
                 let kind = entry.kind;
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    this.context_menu = Some(ContextMenu {
-                        path: path.clone(),
-                        kind,
-                        position: event.position,
-                    });
-                    cx.notify();
+                    // Not the menu of the folder, which the grid opens.
+                    cx.stop_propagation();
+                    this.show_entry_menu(&path, kind, event.position, cx);
                 })
             })
     }
@@ -646,7 +579,6 @@ impl Explorer {
 
 impl Render for Explorer {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let open_command = self.open_command(cx);
         div()
             .size_full()
             .flex()
@@ -661,29 +593,20 @@ impl Render for Explorer {
             )
             .child(self.render_toolbar(cx))
             .when_some(self.notice.clone(), |this, notice| {
-                this.child(
-                    div()
-                        .flex_shrink_0()
-                        .px_3()
-                        .py_1()
-                        .bg(theme(cx).error_background)
-                        .text_sm()
-                        .text_color(theme(cx).error_text)
-                        .child(notice),
-                )
+                this.child(file_actions::render_notice(notice, cx))
             })
-            .child(div().flex_1().min_h_0().child(self.render_grid(cx)))
-            .when_some(self.context_menu.as_ref(), |this, menu| {
-                this.child(
-                    deferred(
-                        anchored()
-                            .position(menu.position)
-                            .snap_to_window()
-                            .child(Self::render_context_menu(menu, &open_command, cx)),
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            this.show_folder_menu(event.position, window, cx);
+                        }),
                     )
-                    .with_priority(1),
-                )
-            })
+                    .child(self.render_grid(cx)),
+            )
     }
 }
 

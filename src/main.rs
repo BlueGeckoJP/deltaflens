@@ -1,5 +1,7 @@
 mod explorer;
+mod file_actions;
 mod images;
+mod menu;
 mod render_image;
 mod settings;
 mod settings_view;

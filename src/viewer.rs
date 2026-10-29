@@ -15,9 +15,12 @@ use gpui::{
 };
 
 use crate::{
+    file_actions,
     images::{ImageKey, Images, ImagesEvent, Picture, Request},
+    menu::{ContextMenu, Menu},
     settings::SettingsStore,
     theme::theme,
+    workspace_view::{NextImage, PreviousImage, ResetView, SplitDown, SplitRight},
 };
 
 /// How much one wheel notch zooms.
@@ -73,6 +76,10 @@ pub struct Viewer {
     folder: Option<Folder>,
     /// The folder being listed, if any.
     folder_task: Option<(PathBuf, Task<()>)>,
+    settings: Entity<SettingsStore>,
+    context_menu: Entity<ContextMenu>,
+    /// The error of the last action from the context menu.
+    notice: Option<SharedString>,
 }
 
 struct Folder {
@@ -85,6 +92,7 @@ impl Viewer {
         path: PathBuf,
         images: Entity<Images>,
         settings: &Entity<SettingsStore>,
+        context_menu: Entity<ContextMenu>,
         cx: &mut Context<Self>,
     ) -> Self {
         let id = cx.entity_id();
@@ -127,6 +135,9 @@ impl Viewer {
             show_hidden,
             folder: None,
             folder_task: None,
+            settings: settings.clone(),
+            context_menu,
+            notice: None,
         };
         this.load(path, Direction::Next, cx);
         this
@@ -137,6 +148,7 @@ impl Viewer {
     pub fn load(&mut self, path: PathBuf, direction: Direction, cx: &mut Context<Self>) {
         self.key = ImageKey::new(path);
         self.direction = direction;
+        self.notice = None;
         self.wanted_downscaled = None;
         self.downscale_task = None;
         self.list_folder(cx);
@@ -415,6 +427,69 @@ impl Viewer {
         cx.notify();
     }
 
+    /// Opens the menu of the image at the mouse. Its actions apply to the
+    /// active tab of the focused pane, which pressing the pane made this one.
+    fn show_menu(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let path = self.key.path.clone();
+        let this = cx.entity().downgrade();
+        let open_command = self.settings.read(cx).settings().open_command.clone();
+        let menu = Menu::new(event.position)
+            .action(
+                "Previous image",
+                PreviousImage,
+                self.neighbor(Direction::Previous).is_some(),
+                window,
+            )
+            .action(
+                "Next image",
+                NextImage,
+                self.neighbor(Direction::Next).is_some(),
+                window,
+            )
+            .action("Reset view", ResetView, true, window)
+            .separator()
+            .item("Copy image", {
+                let this = this.clone();
+                let path = path.clone();
+                move |_, cx| {
+                    let _ = this.update(cx, |_, cx| Self::copy_image(&path, cx));
+                }
+            })
+            .item("Copy path", {
+                let path = path.clone();
+                move |_, cx| file_actions::copy_path(&path, cx)
+            })
+            .item(
+                file_actions::open_with_label(&open_command),
+                move |_, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        let result = file_actions::open_externally(&path, &open_command);
+                        this.notice = file_actions::notice(result);
+                        cx.notify();
+                    });
+                },
+            )
+            .separator()
+            .action("Split right", SplitRight, true, window)
+            .action("Split down", SplitDown, true, window);
+        self.context_menu
+            .update(cx, |context_menu, cx| context_menu.show(menu, cx));
+    }
+
+    /// Copies the image to the clipboard in the background.
+    fn copy_image(path: &Path, cx: &mut Context<Self>) {
+        let task = file_actions::copy_image(path, cx);
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            // Fails only if the viewer is gone.
+            let _ = this.update(cx, |this, cx| {
+                this.notice = file_actions::notice(result);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn on_drag(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
         let Some(last) = self.drag_position.replace(event.position) else {
             return;
@@ -488,6 +563,7 @@ impl Render for Viewer {
             .when(dragging, |this| this.cursor(CursorStyle::ClosedHand))
             .on_scroll(cx.listener(Self::on_scroll))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::show_menu))
             .child(
                 canvas(
                     {
@@ -518,6 +594,16 @@ impl Render for Viewer {
                         .p_4()
                         .text_color(theme(cx).text)
                         .child(error),
+                )
+            })
+            .when_some(self.notice.clone(), |this, notice| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .w_full()
+                        .child(file_actions::render_notice(notice, cx)),
                 )
             })
     }
