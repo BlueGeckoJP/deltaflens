@@ -900,6 +900,39 @@ impl WorkspaceView {
             .update(cx, |context_menu, cx| context_menu.show(menu, cx));
     }
 
+    /// Opens the menu of the operations on the whole application at
+    /// `position`, from the empty part of a tab bar.
+    fn show_app_menu(&mut self, position: Point<Pixels>, window: &Window, cx: &mut Context<Self>) {
+        let window_menu =
+            window_frame::client_tiling(window).is_some() && window.window_controls().window_menu;
+        let menu = Menu::new(position)
+            .action("Open image…", Open, true, window)
+            .action("New tab", NewTab, true, window)
+            .action(
+                "Reopen closed tab",
+                ReopenClosedTab,
+                self.workspace.can_reopen_closed_tab(tab_exists),
+                window,
+            )
+            .separator()
+            .action("One pane", LayoutSingle, true, window)
+            .action("Two columns", LayoutTwoColumns, true, window)
+            .action("Three columns", LayoutThreeColumns, true, window)
+            .action("Grid", LayoutGrid, true, window)
+            .action("Explorer and viewer", LayoutExplorerAndViewer, true, window)
+            .separator()
+            .action("Settings", OpenSettings, true, window)
+            // The menu of the system, which the window frame drawn by the
+            // compositor shows instead.
+            .when(window_menu, |menu| {
+                menu.separator().item("Window menu", move |window, _| {
+                    window.show_window_menu(position);
+                })
+            });
+        self.context_menu
+            .update(cx, |context_menu, cx| context_menu.show(menu, cx));
+    }
+
     /// Reopens the most recently closed tab, skipping those whose file or
     /// folder is gone.
     fn reopen_closed_tab(
@@ -1367,8 +1400,9 @@ impl WorkspaceView {
     }
 
     /// The part of a tab bar right of the tabs. A tab dropped on it moves to
-    /// the end. At the top of the window, it works as a title bar when
-    /// `moves_window` is set.
+    /// the end, and right-clicking it opens the menu of the application. At
+    /// the top of the window, it works as a title bar when `moves_window` is
+    /// set.
     fn render_rest_of_tab_bar(
         pane_id: PaneId,
         tab_count: usize,
@@ -1390,6 +1424,12 @@ impl WorkspaceView {
             .on_drop(
                 cx.listener(move |this, dragged: &DraggedImage, window, cx| {
                     this.open_image_at(dragged, pane_id, tab_count, window, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.show_app_menu(event.position, window, cx);
                 }),
             );
         if !moves_window {
@@ -1419,11 +1459,6 @@ impl WorkspaceView {
                     if event.click_count() == 2 {
                         window.zoom_window();
                     }
-                })
-            })
-            .when(controls.window_menu, |this| {
-                this.on_mouse_down(MouseButton::Right, |event, window, _| {
-                    window.show_window_menu(event.position);
                 })
             })
             .into_any_element()
