@@ -444,6 +444,31 @@ impl Workspace {
         Ok(tab_id)
     }
 
+    /// Opens a tab that shows what the tab shows, right of it in its pane, and
+    /// activates the new tab and focuses the pane.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the tab is not open.
+    pub fn clone_tab(&mut self, tab_id: TabId) -> Result<TabId> {
+        let pane_id = self
+            .pane_of_tab(tab_id)
+            .ok_or_else(|| eyre!("tab {tab_id:?} is not open"))?;
+        let pane = self.pane(pane_id)?;
+        let (index, content) = pane
+            .tabs()
+            .iter()
+            .enumerate()
+            .find(|(_, tab)| tab.id() == tab_id)
+            .map(|(index, tab)| (index, tab.content().clone()))
+            .ok_or_else(|| eyre!("tab {tab_id:?} is not open"))?;
+        let new_id = TabId(self.allocate_id());
+        self.pane_mut(pane_id)?
+            .insert_tab(index + 1, Tab::new(new_id, content));
+        self.focused_pane = pane_id;
+        Ok(new_id)
+    }
+
     /// Activates the tab and focuses its pane.
     ///
     /// # Errors
@@ -1048,6 +1073,32 @@ mod tests {
         workspace.reopen_closed_tab(exists).unwrap();
         assert_eq!(contents(&workspace, first), [viewer("a.jxl")]);
         assert_eq!(workspace.reopen_closed_tab(exists), None);
+    }
+
+    #[test]
+    fn clone_goes_right_of_the_tab_and_becomes_active() {
+        let (mut workspace, first, second, _) = two_panes();
+        let c = workspace.open_tab(first, viewer("c.jxl")).unwrap();
+        let a = workspace.pane(first).unwrap().tabs()[0].id();
+        workspace.focus_pane(second).unwrap();
+
+        let clone = workspace.clone_tab(a).unwrap();
+        assert_eq!(
+            contents(&workspace, first),
+            [viewer("a.jxl"), viewer("a.jxl"), viewer("c.jxl")]
+        );
+        let pane = workspace.pane(first).unwrap();
+        assert_eq!(pane.tabs()[1].id(), clone);
+        assert_eq!(pane.active_tab().map(Tab::id), Some(clone));
+        assert_ne!(clone, a);
+        assert_ne!(clone, c);
+        assert_eq!(workspace.focused_pane(), first);
+    }
+
+    #[test]
+    fn clone_of_a_tab_that_is_not_open_fails() {
+        let mut workspace = Workspace::new();
+        assert!(workspace.clone_tab(TabId(99)).is_err());
     }
 
     #[test]

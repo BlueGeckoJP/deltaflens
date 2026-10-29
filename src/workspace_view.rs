@@ -605,6 +605,15 @@ impl WorkspaceView {
         }
     }
 
+    /// Opens a copy of the tab right of it, without the zoom of a viewer or
+    /// the history of an explorer, as a split does.
+    fn clone_tab(&mut self, tab_id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(error) = self.workspace.clone_tab(tab_id) {
+            tracing::error!("{error:#}");
+        }
+        self.sync_views(window, cx);
+    }
+
     /// Moves a dragged tab to `index` in `pane_id`, from any pane.
     fn move_tab(
         &mut self,
@@ -854,13 +863,27 @@ impl WorkspaceView {
                 let _ = this.update(cx, |this, cx| this.activate_tab(pane_id, tab_id, cx));
             }
         };
+        let copy_tab = {
+            let this = this.clone();
+            move |window: &mut Window, cx: &mut gpui::App| {
+                let _ = this.update(cx, |this, cx| this.clone_tab(tab_id, window, cx));
+            }
+        };
         let close = move |_: &mut Window, cx: &mut gpui::App| {
             let _ = this.update(cx, |this, cx| this.close_tab(pane_id, tab_id, cx));
         };
+        // Only one settings tab is opened.
+        let can_clone = self
+            .workspace
+            .pane(pane_id)
+            .ok()
+            .and_then(|pane| pane.tabs().iter().find(|tab| tab.id() == tab_id))
+            .is_some_and(|tab| *tab.content() != TabContent::Settings);
         let layout = self.workspace.layout();
         let has_neighbor = |side| layout.neighbor(pane_id, side).is_some();
         let menu = Menu::new(position)
             .before_actions(activate)
+            .item_enabled("Clone tab", can_clone, copy_tab)
             .action("Split right", SplitRight, true, window)
             .action("Split down", SplitDown, true, window)
             .separator()

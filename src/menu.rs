@@ -54,14 +54,25 @@ impl Menu {
 
     /// An item that runs `handler`, after the menu is closed.
     pub fn item(
+        self,
+        label: impl Into<SharedString>,
+        handler: impl Fn(&mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.item_enabled(label, true, handler)
+    }
+
+    /// An item that runs `handler`, grayed out and doing nothing unless
+    /// `enabled`.
+    pub fn item_enabled(
         mut self,
         label: impl Into<SharedString>,
+        enabled: bool,
         handler: impl Fn(&mut Window, &mut App) + 'static,
     ) -> Self {
         self.items.push(Item::Entry(Entry {
             label: label.into(),
             shortcut: None,
-            enabled: true,
+            enabled,
             command: Command::Run(Rc::new(handler)),
         }));
         self
