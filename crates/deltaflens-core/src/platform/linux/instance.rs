@@ -3,6 +3,7 @@
 
 use std::{
     ffi::OsStr,
+    fs::{File, TryLockError},
     io::{ErrorKind, Read, Write},
     net::Shutdown,
     os::unix::{
@@ -10,9 +11,17 @@ use std::{
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
+    thread,
+    time::Duration,
 };
 
-use eyre::{Result, WrapErr};
+use eyre::{Result, WrapErr, bail};
+
+/// How many times a start tries to hand over its paths while another one that
+/// holds the lock is starting to listen.
+const HAND_OVER_ATTEMPTS: u32 = 50;
+/// How long it waits between the attempts.
+const HAND_OVER_INTERVAL: Duration = Duration::from_millis(100);
 
 /// The socket of the running instance: `deltaflens.sock` in
 /// `$XDG_RUNTIME_DIR`, which only the user can reach and the system clears
@@ -25,13 +34,56 @@ pub fn instance_socket() -> Option<PathBuf> {
         .map(|dir| dir.join("deltaflens.sock"))
 }
 
-/// Hands `paths` to the instance listening at `socket`. Returns whether there
-/// is one; if not, this start is to become it with [`InstanceListener::bind`].
+/// What a start is to do.
+#[derive(Debug)]
+pub enum Claim {
+    /// Its paths were handed to the running instance, so it is to exit.
+    HandedOver,
+    /// It is the running instance now.
+    Listening(InstanceListener),
+}
+
+/// Hands `paths` to the instance listening at `socket`, or else becomes that
+/// instance.
+///
+/// Only the start that holds the lock beside the socket listens, so that two
+/// starts at the same time do not both become the instance. A start that
+/// cannot take the lock waits for the one that did to listen.
 ///
 /// # Errors
 ///
-/// Returns an error if the instance cannot be told.
-pub fn hand_over(socket: &Path, paths: &[PathBuf]) -> Result<bool> {
+/// Returns an error if the instance cannot be told, or the socket cannot be
+/// made.
+pub fn claim(socket: &Path, paths: &[PathBuf]) -> Result<Claim> {
+    let lock_path = socket.with_extension("lock");
+    for _ in 0..HAND_OVER_ATTEMPTS {
+        if hand_over(socket, paths)? {
+            return Ok(Claim::HandedOver);
+        }
+        let lock = File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .wrap_err_with(|| format!("failed to open {}", lock_path.display()))?;
+        match lock.try_lock() {
+            Ok(()) => return InstanceListener::bind(socket, lock).map(Claim::Listening),
+            Err(TryLockError::WouldBlock) => thread::sleep(HAND_OVER_INTERVAL),
+            Err(TryLockError::Error(error)) => {
+                return Err(error)
+                    .wrap_err_with(|| format!("failed to lock {}", lock_path.display()));
+            }
+        }
+    }
+    bail!(
+        "another instance holds {} but does not listen",
+        lock_path.display()
+    )
+}
+
+/// Hands `paths` to the instance listening at `socket`. Returns whether there
+/// is one.
+fn hand_over(socket: &Path, paths: &[PathBuf]) -> Result<bool> {
     let mut stream = match UnixStream::connect(socket) {
         Ok(stream) => stream,
         // Nobody listens: there is no socket, or one left by an instance that
@@ -58,16 +110,16 @@ pub fn hand_over(socket: &Path, paths: &[PathBuf]) -> Result<bool> {
 #[derive(Debug)]
 pub struct InstanceListener {
     listener: UnixListener,
+    /// Held while listening. The system lets go of it when the process ends,
+    /// however it ends.
+    _lock: File,
 }
 
 impl InstanceListener {
     /// Listens at `socket`, replacing a socket left by an instance that did
-    /// not exit cleanly.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the socket cannot be made.
-    pub fn bind(socket: &Path) -> Result<Self> {
+    /// not exit cleanly. `lock` must be locked, so that no other instance
+    /// listens there.
+    fn bind(socket: &Path, lock: File) -> Result<Self> {
         match std::fs::remove_file(socket) {
             Ok(()) => {}
             Err(error) if error.kind() == ErrorKind::NotFound => {}
@@ -78,7 +130,10 @@ impl InstanceListener {
         }
         let listener = UnixListener::bind(socket)
             .wrap_err_with(|| format!("failed to listen at {}", socket.display()))?;
-        Ok(Self { listener })
+        Ok(Self {
+            listener,
+            _lock: lock,
+        })
     }
 
     /// Waits for a later start and returns the paths it hands over, which may
@@ -133,42 +188,66 @@ mod tests {
         assert_eq!(decode(&encode(&[])), Vec::<PathBuf>::new());
     }
 
+    fn socket(dir: &TempDir) -> PathBuf {
+        dir.path().join("deltaflens.sock")
+    }
+
+    fn listening(claim: Claim) -> InstanceListener {
+        match claim {
+            Claim::Listening(listener) => listener,
+            Claim::HandedOver => panic!("handed over"),
+        }
+    }
+
     #[test]
-    fn nobody_listening_means_no_instance() {
-        let dir = TempDir::with_files("instance-none", &[]);
-        let socket = dir.path().join("deltaflens.sock");
-        assert!(!hand_over(&socket, &[PathBuf::from("/a.png")]).unwrap());
+    fn first_start_listens() {
+        let dir = TempDir::with_files("instance-first", &[]);
+        assert!(!hand_over(&socket(&dir), &[PathBuf::from("/a.png")]).unwrap());
+        listening(claim(&socket(&dir), &[]).unwrap());
     }
 
     #[test]
     fn paths_reach_the_running_instance() {
         let dir = TempDir::with_files("instance-running", &[]);
-        let socket = dir.path().join("deltaflens.sock");
-        let listener = InstanceListener::bind(&socket).unwrap();
+        let listener = listening(claim(&socket(&dir), &[]).unwrap());
         let paths = vec![PathBuf::from("/a.png"), PathBuf::from("/b c.jxl")];
-        let sent = std::thread::spawn({
-            let (socket, paths) = (socket.clone(), paths.clone());
-            move || hand_over(&socket, &paths).unwrap()
+        let claimed = thread::spawn({
+            let (socket, paths) = (socket(&dir), paths.clone());
+            move || claim(&socket, &paths).unwrap()
         });
         assert_eq!(listener.accept().unwrap(), paths);
-        assert!(sent.join().unwrap());
+        assert!(matches!(claimed.join().unwrap(), Claim::HandedOver));
+    }
+
+    #[test]
+    fn start_waits_for_the_one_holding_the_lock() {
+        let dir = TempDir::with_files("instance-starting", &[]);
+        // Another start holds the lock but listens only later.
+        let lock = File::create(socket(&dir).with_extension("lock")).unwrap();
+        lock.try_lock().unwrap();
+        let claimed = thread::spawn({
+            let socket = socket(&dir);
+            move || claim(&socket, &[PathBuf::from("/a.png")]).unwrap()
+        });
+        thread::sleep(HAND_OVER_INTERVAL * 3);
+        let listener = InstanceListener::bind(&socket(&dir), lock).unwrap();
+        assert!(matches!(claimed.join().unwrap(), Claim::HandedOver));
+        assert_eq!(listener.accept().unwrap(), [PathBuf::from("/a.png")]);
     }
 
     #[test]
     fn socket_left_by_a_killed_instance_is_replaced() {
         let dir = TempDir::with_files("instance-stale", &[]);
-        let socket = dir.path().join("deltaflens.sock");
-        // Dropping the listener leaves the socket file, as a killed process
-        // does.
-        drop(InstanceListener::bind(&socket).unwrap());
-        assert!(socket.exists());
-        assert!(!hand_over(&socket, &[]).unwrap());
-        let listener = InstanceListener::bind(&socket).unwrap();
-        let sent = std::thread::spawn({
-            let socket = socket.clone();
-            move || hand_over(&socket, &[]).unwrap()
+        // Dropping the listener leaves the socket file and lets go of the
+        // lock, as a killed process does.
+        drop(listening(claim(&socket(&dir), &[]).unwrap()));
+        assert!(socket(&dir).exists());
+        let listener = listening(claim(&socket(&dir), &[]).unwrap());
+        let claimed = thread::spawn({
+            let socket = socket(&dir);
+            move || claim(&socket, &[]).unwrap()
         });
         assert_eq!(listener.accept().unwrap(), Vec::<PathBuf>::new());
-        assert!(sent.join().unwrap());
+        assert!(matches!(claimed.join().unwrap(), Claim::HandedOver));
     }
 }

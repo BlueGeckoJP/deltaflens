@@ -160,13 +160,9 @@ fn claim_instance(paths: &[PathBuf]) -> Start {
     let Some(socket) = platform::instance_socket() else {
         return Start::Own(None);
     };
-    match platform::hand_over(&socket, paths) {
-        Ok(true) => return Start::HandedOver,
-        Ok(false) => {}
-        Err(error) => tracing::warn!("{error:#}"),
-    }
-    match platform::InstanceListener::bind(&socket) {
-        Ok(listener) => Start::Own(Some(listener)),
+    match platform::claim(&socket, paths) {
+        Ok(platform::Claim::HandedOver) => Start::HandedOver,
+        Ok(platform::Claim::Listening(listener)) => Start::Own(Some(listener)),
         Err(error) => {
             tracing::warn!("later starts open new windows: {error:#}");
             Start::Own(None)

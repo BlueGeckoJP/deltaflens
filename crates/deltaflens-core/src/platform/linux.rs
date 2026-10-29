@@ -10,7 +10,7 @@ use std::{
 };
 
 pub use self::{
-    instance::{InstanceListener, hand_over, instance_socket},
+    instance::{Claim, InstanceListener, claim, instance_socket},
     thumbnail_cache::ThumbnailCache,
 };
 
