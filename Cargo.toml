@@ -18,6 +18,10 @@ image = { version = "0.25", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+[features]
+# Opens AVIF images with dav1d, which must be installed where it is built.
+avif = ["deltaflens-core/avif"]
+
 # For `mallopt`, which glibc offers but the standard library does not.
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 libc = "0.2"

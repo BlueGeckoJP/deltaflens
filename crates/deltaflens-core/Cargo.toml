@@ -42,5 +42,9 @@ natord = "1.0"
 png = "0.18"
 tracing = "0.1"
 
+[features]
+# Opens AVIF images with dav1d, which must be installed where it is built.
+avif = ["image/avif-native"]
+
 [lints]
 workspace = true

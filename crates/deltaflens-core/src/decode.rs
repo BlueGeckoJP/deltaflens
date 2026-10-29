@@ -123,11 +123,15 @@ fn decode_inner(path: &Path) -> Result<DecodedImage> {
 }
 
 /// Returns whether the extension of `path` (case-insensitive) belongs to a
-/// format that [`decode`] can read.
+/// format that [`decode`] can read. AVIF is one only with the `avif`
+/// feature.
 #[must_use]
 pub fn is_supported_image(path: &Path) -> bool {
     path.extension().is_some_and(|extension| {
         extension.eq_ignore_ascii_case("jxl")
+            // `ImageFormat::reading_enabled` tells whether the AVIF encoder
+            // of `image` is built, not the decoder.
+            || (cfg!(feature = "avif") && extension.eq_ignore_ascii_case("avif"))
             || ImageFormat::from_extension(extension).is_some_and(|format| format.reading_enabled())
     })
 }
@@ -269,10 +273,33 @@ mod tests {
 
     #[test]
     fn unsupported_extensions() {
-        // AVIF and DDS are known to `image` but cannot be read with the
-        // enabled features.
-        for name in ["a.txt", "a.avif", "a.dds", "png", "a"] {
+        // DDS is known to `image` but cannot be read with the enabled
+        // features.
+        for name in ["a.txt", "a.dds", "png", "a"] {
             assert!(!is_supported_image(Path::new(name)), "{name}");
+        }
+    }
+
+    #[test]
+    fn avif_is_supported_only_with_its_feature() {
+        for name in ["a.avif", "a.AVIF"] {
+            assert_eq!(is_supported_image(Path::new(name)), cfg!(feature = "avif"));
+        }
+    }
+
+    #[cfg(not(feature = "avif"))]
+    #[test]
+    fn decode_avif_fails_without_its_feature() {
+        assert!(decode(&fixture("red-3x2.avif")).is_err());
+    }
+
+    #[cfg(feature = "avif")]
+    #[test]
+    fn decode_avif_as_bgra() {
+        let image = decode(&fixture("red-3x2.avif")).unwrap();
+        assert_eq!((image.width(), image.height()), (3, 2));
+        for &pixel in image.pixels().as_chunks::<4>().0 {
+            assert_close(pixel, RED);
         }
     }
 }

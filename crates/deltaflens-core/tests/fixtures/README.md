@@ -125,3 +125,15 @@ let icc = profile.encode().unwrap();
 // with `icc`; JxlEncoderSetFrameDistance 0.5; then the 8-bit RGB pixels
 // [234, 51, 35] x 64 with JxlEncoderAddImageFrame.
 ```
+
+`red-3x2.avif` is made with the pure-Rust encoder `ravif` 0.13:
+
+```rust
+let pixels = vec![rgb::RGBA8::new(255, 0, 0, 255); 6];
+let encoded = ravif::Encoder::new()
+    .with_quality(100.0)
+    .with_speed(10)
+    .encode_rgba(ravif::Img::new(&pixels[..], 3, 2))
+    .unwrap();
+std::fs::write("red-3x2.avif", encoded.avif_file).unwrap();
+```

@@ -45,3 +45,13 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      # The `avif` feature needs dav1d, which the default build does not.
+      - name: Install dav1d
+        run: sudo apt-get install -y libdav1d-dev
+
+      - name: Clippy with AVIF
+        run: cargo clippy --workspace --all-targets --features avif -- -D warnings
+
+      - name: Test with AVIF
+        run: cargo test --workspace --features avif
