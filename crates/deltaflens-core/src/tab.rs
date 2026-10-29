@@ -11,6 +11,8 @@ pub enum TabContent {
     Explorer {
         dir: PathBuf,
     },
+    /// Shows the settings and changes them.
+    Settings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

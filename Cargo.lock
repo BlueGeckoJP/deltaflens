@@ -1317,12 +1317,13 @@ dependencies = [
  "color-eyre",
  "deltaflens-core",
  "eyre",
+ "futures",
  "gpui",
  "gpui_platform",
  "image",
- "libc",
  "tracing",
  "tracing-subscriber",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -1334,10 +1335,14 @@ dependencies = [
  "image",
  "jxl-oxide",
  "jxl-render",
+ "libc",
  "md-5",
  "moxcms",
  "natord",
  "png 0.18.1",
+ "serde",
+ "toml 1.1.8+spec-1.1.0",
+ "toml_edit 0.25.17+spec-1.1.0",
  "tracing",
 ]
 
@@ -5640,6 +5645,7 @@ dependencies = [
  "indexmap",
  "toml_datetime 1.1.2+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow 1.0.4",
 ]
 

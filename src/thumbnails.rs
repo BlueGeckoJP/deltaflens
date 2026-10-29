@@ -6,7 +6,7 @@ use std::{
     time::SystemTime,
 };
 
-use deltaflens_core::{LruCache, ThumbnailCache, thumbnail};
+use deltaflens_core::{LruCache, platform::ThumbnailCache, thumbnail};
 use eyre::Result;
 use gpui::{Context, RenderImage, prelude::*};
 

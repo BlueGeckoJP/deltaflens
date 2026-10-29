@@ -110,6 +110,16 @@ impl<K: Clone + Eq + Hash, V> LruCache<K, V> {
         evicted
     }
 
+    /// Changes the total size the cache holds.
+    ///
+    /// Returns the values that no longer fit, the least recently used first.
+    pub fn set_capacity(&mut self, capacity: usize) -> Vec<(K, V)> {
+        self.capacity = capacity;
+        let mut evicted = Vec::new();
+        self.evict_to_fit(0, &mut evicted);
+        evicted
+    }
+
     /// Replaces the pinned keys.
     ///
     /// Returns the values that no longer fit once the previous ones are no
@@ -294,6 +304,17 @@ mod tests {
         let evicted = cache.set_pinned(pin(&["c"]));
         assert_eq!(keys(&evicted), ["b"]);
         assert_eq!(cache.bytes(), 8);
+    }
+
+    #[test]
+    fn smaller_capacity_evicts_least_recently_used() {
+        let mut cache = LruCache::new(10);
+        cache.insert("a", 1, 4);
+        cache.insert("b", 2, 4);
+        cache.get(&"a");
+        assert_eq!(keys(&cache.set_capacity(5)), ["b"]);
+        assert_eq!(cache.insert("c", 3, 2), [("a", 1)]);
+        assert_eq!(cache.set_capacity(100), []);
     }
 
     #[test]

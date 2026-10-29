@@ -1,6 +1,10 @@
 mod explorer;
 mod images;
 mod render_image;
+mod settings;
+mod settings_view;
+mod text_input;
+mod theme;
 mod thumbnails;
 mod viewer;
 mod window_frame;
@@ -9,19 +13,21 @@ mod workspace_view;
 use std::path::PathBuf;
 
 use clap::Parser;
+use deltaflens_core::platform;
 use eyre::Result;
+use futures::StreamExt as _;
 use gpui::{
     App, Bounds, KeyBinding, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
-    WindowDecorations, WindowOptions, actions, prelude::*, px, size,
+    WindowDecorations, WindowHandle, WindowOptions, actions, prelude::*, px, size,
 };
 use tracing_subscriber::EnvFilter;
 
 use crate::workspace_view::{
     ActivateNextTab, ActivatePreviousTab, CloseTab, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
     FocusPaneUp, GoBack, GoForward, GoUp, LayoutExplorerAndViewer, LayoutGrid, LayoutSingle,
-    LayoutThreeColumns, LayoutTwoColumns, NewTab, NextImage, Open, PreviousImage, ReopenClosedTab,
-    ResetView, SplitDown, SplitRight, SwapPaneDown, SwapPaneLeft, SwapPaneRight, SwapPaneUp,
-    WorkspaceView,
+    LayoutThreeColumns, LayoutTwoColumns, NewTab, NextImage, Open, OpenSettings, PreviousImage,
+    ReopenClosedTab, ResetView, SplitDown, SplitRight, SwapPaneDown, SwapPaneLeft, SwapPaneRight,
+    SwapPaneUp, WorkspaceView,
 };
 
 actions!(deltaflens, [Quit]);
@@ -30,29 +36,11 @@ actions!(deltaflens, [Quit]);
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Args {
-    /// Image or folder to open. Without it, the working directory is opened.
+    /// Image or folder to open. Without it, the last session is restored, or
+    /// else the working directory is opened. If deltaflens is running, it is
+    /// opened there instead.
     #[arg(long, value_name = "PATH")]
     open: Option<PathBuf>,
-}
-
-/// Allocations at least this large get their own memory mapping.
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-const MMAP_THRESHOLD: libc::c_int = 1024 * 1024;
-
-/// Makes the memory of large allocations, such as decoded images, go back to
-/// the system when they are freed.
-///
-/// By default glibc raises this threshold up to 32 MB as large allocations
-/// are freed, and keeps the freed memory of smaller ones for later. The
-/// buffers made while decoding images are just below that, so the memory used
-/// grew to about twice the limit of the image cache.
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-fn return_large_allocations_to_the_system() {
-    // SAFETY: `mallopt` only changes a setting of the allocator, which takes
-    // effect for later allocations.
-    if unsafe { libc::mallopt(libc::M_MMAP_THRESHOLD, MMAP_THRESHOLD) } == 0 {
-        tracing::warn!("failed to set the mmap threshold of the allocator");
-    }
 }
 
 fn main() -> Result<()> {
@@ -61,8 +49,14 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    return_large_allocations_to_the_system();
+    platform::return_large_allocations_to_the_system();
+    // Relative paths would mean another folder to a running instance.
+    let open = args
+        .open
+        .map(|path| std::path::absolute(&path).unwrap_or(path));
+    let Start::Own(listener) = claim_instance(open.as_slice()) else {
+        return Ok(());
+    };
 
     gpui_platform::application().run(move |cx: &mut App| {
         cx.on_action(|_: &Quit, cx| cx.quit());
@@ -101,7 +95,9 @@ fn main() -> Result<()> {
             KeyBinding::new("ctrl-k 3", LayoutThreeColumns, None),
             KeyBinding::new("ctrl-k 4", LayoutGrid, None),
             KeyBinding::new("ctrl-k 5", LayoutExplorerAndViewer, None),
+            KeyBinding::new("ctrl-,", OpenSettings, None),
         ]);
+        cx.bind_keys(text_input::key_bindings());
 
         let options = WindowOptions {
             titlebar: Some(TitlebarOptions {
@@ -124,21 +120,91 @@ fn main() -> Result<()> {
         let result = cx.open_window(options, |window, cx| {
             cx.new(|cx| {
                 let mut view = WorkspaceView::new(window, cx);
-                if let Some(path) = args.open.or_else(workspace_view::default_dir) {
+                let restored = view.restore_session(window, cx);
+                // A new session starts in the working directory.
+                let path = open.or_else(|| (!restored).then(workspace_view::default_dir).flatten());
+                if let Some(path) = path {
                     view.open_path(path, window, cx);
-                } else {
+                } else if !restored {
                     tracing::error!("no folder to open: the working directory is unknown");
                 }
                 view
             })
         });
-        if let Err(error) = result {
-            tracing::error!("failed to open window: {error:#}");
-            cx.quit();
+        match result {
+            Ok(window) => {
+                if let Some(listener) = listener {
+                    open_handed_over_paths(listener, window, cx);
+                }
+            }
+            Err(error) => {
+                tracing::error!("failed to open window: {error:#}");
+                cx.quit();
+            }
         }
     });
 
     Ok(())
+}
+
+/// What this start does.
+enum Start {
+    /// It handed its paths to a running instance, and exits.
+    HandedOver,
+    /// It runs, listening for later starts unless that cannot be set up.
+    Own(Option<platform::InstanceListener>),
+}
+
+/// Hands `paths` to a running instance, if there is one.
+fn claim_instance(paths: &[PathBuf]) -> Start {
+    let Some(socket) = platform::instance_socket() else {
+        return Start::Own(None);
+    };
+    match platform::claim(&socket, paths) {
+        Ok(platform::Claim::HandedOver) => Start::HandedOver,
+        Ok(platform::Claim::Listening(listener)) => Start::Own(Some(listener)),
+        Err(error) => {
+            tracing::warn!("later starts open new windows: {error:#}");
+            Start::Own(None)
+        }
+    }
+}
+
+/// Opens the paths that later starts hand over, in new tabs of the focused
+/// pane, and brings the window to the front.
+fn open_handed_over_paths(
+    listener: platform::InstanceListener,
+    window: WindowHandle<WorkspaceView>,
+    cx: &mut App,
+) {
+    let (sender, mut receiver) = futures::channel::mpsc::unbounded();
+    // Waiting for a connection blocks, so it has a thread of its own.
+    std::thread::spawn(move || {
+        loop {
+            match listener.accept() {
+                Ok(paths) => {
+                    if sender.unbounded_send(paths).is_err() {
+                        break;
+                    }
+                }
+                Err(error) => tracing::warn!("failed to receive paths to open: {error:#}"),
+            }
+        }
+    });
+    cx.spawn(async move |cx| {
+        while let Some(paths) = receiver.next().await {
+            let opened = window.update(cx, |view, window, cx| {
+                for path in paths {
+                    view.open_path(path, window, cx);
+                }
+                window.activate_window();
+            });
+            if opened.is_err() {
+                break;
+            }
+        }
+    })
+    .detach();
 }
 
 #[cfg(test)]

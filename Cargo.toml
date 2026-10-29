@@ -9,6 +9,9 @@ members = ["crates/*"]
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 color-eyre = "0.6"
+# The same version as gpui uses. Passes paths from the thread that waits for
+# later starts to the UI.
+futures = "0.3"
 deltaflens-core = { path = "crates/deltaflens-core" }
 eyre = "0.6"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "544780422affd11699fb531c49af5cc6e82a3fd7" }
@@ -16,15 +19,14 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "54478042
 # Only for wrapping decoded pixels in the buffer type gpui expects.
 image = { version = "0.25", default-features = false }
 tracing = "0.1"
+# The same version as gpui uses. Moves the cursor of a text field by whole
+# characters as the user sees them.
+unicode-segmentation = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]
 # Opens AVIF images with dav1d, which must be installed where it is built.
 avif = ["deltaflens-core/avif"]
-
-# For `mallopt`, which glibc offers but the standard library does not.
-[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
-libc = "0.2"
 
 [lints]
 workspace = true

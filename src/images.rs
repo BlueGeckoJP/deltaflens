@@ -6,16 +6,16 @@ use std::{
 };
 
 use deltaflens_core::{
-    DecodedImage, LruCache, TileRect, cut_tiles, decode, downscale, overview_size, tile_rects,
+    DecodedImage, LruCache, Settings, TileRect, cut_tiles, decode, downscale, overview_size,
+    tile_rects,
 };
 use eyre::{Result, eyre};
-use gpui::{AppContext as _, Context, EntityId, EventEmitter, RenderImage, SharedString, Task};
+use gpui::{
+    AppContext as _, Context, Entity, EntityId, EventEmitter, RenderImage, SharedString, Task,
+};
 
-use crate::render_image::to_render_image;
+use crate::{render_image::to_render_image, settings::SettingsStore};
 
-/// How many bytes of decoded images to keep in memory. A 4K image takes about
-/// 33 MB.
-const CACHE_BYTES: usize = 1024 * 1024 * 1024;
 /// The largest texture assumed to be possible, in pixels on each side. gpui
 /// does not tell the limit of the GPU; desktop GPUs have at least 8192.
 const MAX_TEXTURE_SIZE: u32 = 8192;
@@ -174,7 +174,18 @@ pub struct Images {
 impl EventEmitter<ImagesEvent> for Images {}
 
 impl Images {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    /// Keeps as many bytes of decoded images as the settings allow. A 4K
+    /// image takes about 33 MB.
+    pub fn new(settings: &Entity<SettingsStore>, cx: &mut Context<Self>) -> Self {
+        cx.observe(settings, |this, settings, cx| {
+            let bytes = cache_bytes(settings.read(cx).settings());
+            let evicted = this.cache.set_capacity(bytes);
+            Self::release(
+                evicted.into_iter().map(|(_, picture)| picture).collect(),
+                cx,
+            );
+        })
+        .detach();
         cx.on_release(|this, cx| {
             for (_, picture) in this.cache.drain() {
                 for image in picture.textures() {
@@ -184,7 +195,7 @@ impl Images {
         })
         .detach();
         Self {
-            cache: LruCache::new(CACHE_BYTES),
+            cache: LruCache::new(cache_bytes(settings.read(cx).settings())),
             requests: HashMap::new(),
             in_progress: HashMap::new(),
             failed: HashMap::new(),
@@ -429,6 +440,13 @@ impl Images {
             }
         });
     }
+}
+
+/// The bytes of decoded images to keep in memory.
+fn cache_bytes(settings: &Settings) -> usize {
+    usize::try_from(settings.image_cache_mib)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(1024 * 1024)
 }
 
 /// Downscales `image` to `size` with a Lanczos3 filter.
