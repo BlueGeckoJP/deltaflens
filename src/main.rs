@@ -110,9 +110,14 @@ fn main() -> Result<()> {
         let result = cx.open_window(options, |window, cx| {
             cx.new(|cx| {
                 let mut view = WorkspaceView::new(window, cx);
-                if let Some(path) = args.open.or_else(workspace_view::default_dir) {
+                let restored = view.restore_session(window, cx);
+                // A new session starts in the working directory.
+                let path = args
+                    .open
+                    .or_else(|| (!restored).then(workspace_view::default_dir).flatten());
+                if let Some(path) = path {
                     view.open_path(path, window, cx);
-                } else {
+                } else if !restored {
                     tracing::error!("no folder to open: the working directory is unknown");
                 }
                 view

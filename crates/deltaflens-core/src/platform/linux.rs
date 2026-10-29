@@ -35,6 +35,13 @@ pub fn config_dir() -> Option<PathBuf> {
     xdg_dir("XDG_CONFIG_HOME", ".config")
 }
 
+/// The directory for state that is kept between runs, such as the last
+/// session: `$XDG_STATE_HOME`, or `~/.local/state`.
+#[must_use]
+pub fn state_dir() -> Option<PathBuf> {
+    xdg_dir("XDG_STATE_HOME", ".local/state")
+}
+
 /// The directory of the XDG Base Directory Specification in the environment
 /// variable `var`, or else `default` in the home directory.
 fn xdg_dir(var: &str, default: &str) -> Option<PathBuf> {

@@ -4,8 +4,8 @@ use std::{
 };
 
 use deltaflens_core::{
-    Axis, Direction, DropZone, Layout, PaneId, Preset, Side, Tab, TabContent, TabId, Workspace,
-    drop_zone,
+    Axis, Direction, DropZone, Layout, PaneId, Preset, Session, Side, Tab, TabContent, TabId,
+    Workspace, drop_zone,
 };
 use eyre::{Result, eyre};
 use gpui::{
@@ -172,6 +172,10 @@ pub struct WorkspaceView {
     tab_menu: Option<TabMenu>,
     /// Where a tab or image dragged over a pane would go.
     drop_target: Option<(PaneId, DropZone)>,
+    /// The session last saved, to save it again only when it changes. `None`
+    /// until the session is restored, so that the saved one is not replaced
+    /// before.
+    saved_session: Option<Session>,
 }
 
 impl WorkspaceView {
@@ -207,7 +211,67 @@ impl WorkspaceView {
             move_pending: false,
             tab_menu: None,
             drop_target: None,
+            saved_session: None,
         }
+    }
+
+    /// Restores the layout and the tabs of the last session, leaving out
+    /// files and folders that are gone. Returns whether any tab is restored.
+    /// A session that cannot be read is left alone, so that it does not keep
+    /// the application from starting.
+    pub fn restore_session(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let restored = Session::path()
+            .map(|path| Session::load(&path))
+            .transpose()
+            .map(Option::flatten)
+            .and_then(|session| {
+                session
+                    .map(|session| session.restore(tab_exists))
+                    .transpose()
+            });
+        let workspace = match restored {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                tracing::warn!("the last session is not restored: {error:#}");
+                None
+            }
+        };
+        let any_tab = workspace.as_ref().is_some_and(|workspace| {
+            workspace
+                .layout()
+                .pane_ids()
+                .into_iter()
+                .any(|id| workspace.pane(id).is_ok_and(|pane| !pane.tabs().is_empty()))
+        });
+        if let Some(workspace) = workspace {
+            self.workspace = workspace;
+            self.views.clear();
+            self.sync_views(window, cx);
+        }
+        self.saved_session = Some(Session::of(&self.workspace));
+        any_tab
+    }
+
+    /// Saves the session in the background if it changed since it was last
+    /// saved.
+    fn save_session(&mut self, cx: &mut Context<Self>) {
+        let Some(saved) = &self.saved_session else {
+            return;
+        };
+        let session = Session::of(&self.workspace);
+        if *saved == session {
+            return;
+        }
+        self.saved_session = Some(session.clone());
+        let Some(path) = Session::path() else {
+            return;
+        };
+        cx.background_spawn(async move {
+            if let Err(error) = session.save(&path) {
+                tracing::warn!("failed to save the session: {error:#}");
+            }
+        })
+        .detach();
     }
 
     /// Opens `path` in a new tab of the focused pane: an explorer for a folder,
@@ -830,12 +894,7 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let exists = |content: &TabContent| match content {
-            TabContent::Viewer { path } => path.is_file(),
-            TabContent::Explorer { dir } => dir.is_dir(),
-            TabContent::Settings => true,
-        };
-        if self.workspace.reopen_closed_tab(exists).is_some() {
+        if self.workspace.reopen_closed_tab(tab_exists).is_some() {
             self.sync_views(window, cx);
         }
     }
@@ -1377,6 +1436,15 @@ fn render_drop_zone(zone: DropZone, color: Rgba) -> impl IntoElement {
     }
 }
 
+/// Whether the file or folder a tab shows is still there.
+fn tab_exists(content: &TabContent) -> bool {
+    match content {
+        TabContent::Viewer { path } => path.is_file(),
+        TabContent::Explorer { dir } => dir.is_dir(),
+        TabContent::Settings => true,
+    }
+}
+
 /// The label of a tab: the file or folder name of what it shows.
 fn tab_name(tab: &Tab) -> String {
     let path = match tab.content() {
@@ -1394,6 +1462,7 @@ impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.update_title(window);
         self.update_visibility(cx);
+        self.save_session(cx);
         // A drag that ended outside every pane leaves nothing to show.
         if !cx.has_active_drag() {
             self.drop_target = None;

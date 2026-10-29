@@ -472,7 +472,38 @@ impl Workspace {
             .map(|(&pane_id, _)| pane_id)
     }
 
-    fn allocate_id(&mut self) -> u64 {
+    /// Replaces the layout, the panes and the focused pane, for restoring a
+    /// session. `panes` must hold the panes of `layout`.
+    pub(crate) fn replace(&mut self, layout: Layout, panes: Vec<(PaneId, Pane)>, focused: PaneId) {
+        self.layout = layout;
+        self.panes = panes.into_iter().collect();
+        self.focused_pane = focused;
+        self.closed_tabs.clear();
+    }
+
+    /// Closes the panes without tabs, unless every pane is empty, in which case
+    /// one is kept.
+    pub(crate) fn close_empty_panes(&mut self) {
+        let empty: Vec<PaneId> = self
+            .layout
+            .pane_ids()
+            .into_iter()
+            .filter(|id| self.panes.get(id).is_none_or(|pane| pane.tabs().is_empty()))
+            .collect();
+        for id in empty {
+            if self.layout.pane_ids().len() == 1 {
+                break;
+            }
+            if let Ok(neighbor) = self.layout.remove(id) {
+                self.panes.remove(&id);
+                if self.focused_pane == id {
+                    self.focused_pane = neighbor;
+                }
+            }
+        }
+    }
+
+    pub(crate) fn allocate_id(&mut self) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         id
