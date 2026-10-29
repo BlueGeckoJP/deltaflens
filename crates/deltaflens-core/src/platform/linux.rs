@@ -1,5 +1,6 @@
 //! Linux, following the freedesktop standards.
 
+mod instance;
 mod thumbnail_cache;
 
 use std::{
@@ -8,7 +9,10 @@ use std::{
     process::Command,
 };
 
-pub use self::thumbnail_cache::ThumbnailCache;
+pub use self::{
+    instance::{InstanceListener, hand_over, instance_socket},
+    thumbnail_cache::ThumbnailCache,
+};
 
 /// The command that opens a file with the application chosen for its type.
 /// `<path>` is replaced with the path of the file.

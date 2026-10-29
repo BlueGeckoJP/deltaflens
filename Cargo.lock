@@ -1317,6 +1317,7 @@ dependencies = [
  "color-eyre",
  "deltaflens-core",
  "eyre",
+ "futures",
  "gpui",
  "gpui_platform",
  "image",
