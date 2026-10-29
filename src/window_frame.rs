@@ -2,18 +2,17 @@
 //! rounded corners and resize edges around the window, and the window buttons.
 
 use gpui::{
-    AnyElement, Bounds, BoxShadow, CursorStyle, Decorations, Div, Hsla, MouseButton,
-    MouseDownEvent, PathBuilder, Pixels, ResizeEdge, Rgba, Tiling, Window, canvas, div, point,
-    prelude::*, px, rgb,
+    AnyElement, App, Bounds, BoxShadow, CursorStyle, Decorations, Div, MouseButton, MouseDownEvent,
+    PathBuilder, Pixels, ResizeEdge, Rgba, Tiling, Window, canvas, div, point, prelude::*, px,
 };
+
+use crate::theme::theme;
 
 /// The width of the transparent margin around a floating window that holds
 /// the shadow and the resize edges.
 const SHADOW_SIZE: Pixels = px(10.);
 /// The radius of the corners of a floating window.
 pub const ROUNDING: Pixels = px(10.);
-/// The background of the window.
-const BACKGROUND: u32 = 0x1e_1e_1e;
 /// The width of a window button. Its height is that of the tab bar.
 const BUTTON_WIDTH: Pixels = px(46.);
 /// The size of the square that holds the icon of a window button.
@@ -32,12 +31,13 @@ pub fn client_tiling(window: &Window) -> Option<Tiling> {
 ///
 /// When the compositor draws the frame, only the background is drawn, so the
 /// window looks the same as without client-side decorations.
-pub fn window_frame(content: impl IntoElement, window: &mut Window) -> AnyElement {
+pub fn window_frame(content: impl IntoElement, window: &mut Window, cx: &App) -> AnyElement {
+    let theme = theme(cx);
     let Some(tiling) = client_tiling(window) else {
         window.set_client_inset(px(0.));
         return div()
             .size_full()
-            .bg(rgb(BACKGROUND))
+            .bg(theme.background)
             .child(content)
             .into_any_element();
     };
@@ -53,22 +53,12 @@ pub fn window_frame(content: impl IntoElement, window: &mut Window) -> AnyElemen
         .child(
             div()
                 .size_full()
-                .bg(rgb(BACKGROUND))
+                .bg(theme.background)
                 .map(|this| round_corners(this, tiling))
                 // A fully tiled window has no margin left to draw the shadow in.
                 .when(tiling != Tiling::tiled(), |this| {
                     this.shadow(vec![
-                        BoxShadow::new(
-                            px(0.),
-                            px(0.),
-                            Hsla {
-                                h: 0.,
-                                s: 0.,
-                                l: 0.,
-                                a: 0.4,
-                            },
-                        )
-                        .blur_radius(SHADOW_SIZE / 2.),
+                        BoxShadow::new(px(0.), px(0.), theme.shadow).blur_radius(SHADOW_SIZE / 2.),
                     ])
                 })
                 .child(content),
@@ -158,7 +148,8 @@ enum Icon {
 /// compositor supports are shown.
 ///
 /// `round_top_right` rounds the close button to fit the corner of the window.
-pub fn window_controls(window: &Window, round_top_right: bool) -> impl IntoElement {
+pub fn window_controls(window: &Window, round_top_right: bool, cx: &App) -> impl IntoElement {
+    let theme = theme(cx);
     let controls = window.window_controls();
     let zoom_icon = if window.is_maximized() {
         Icon::Restore
@@ -171,24 +162,25 @@ pub fn window_controls(window: &Window, round_top_right: bool) -> impl IntoEleme
         .h_full()
         .when(controls.minimize, |this| {
             this.child(
-                window_button("minimize", Icon::Minimize, rgb(0x2a_2a_2a))
+                window_button("minimize", Icon::Minimize, theme.element, theme.text)
                     .on_click(|_, window, _| window.minimize_window()),
             )
         })
         .when(controls.maximize, |this| {
             this.child(
-                window_button("maximize", zoom_icon, rgb(0x2a_2a_2a))
+                window_button("maximize", zoom_icon, theme.element, theme.text)
                     .on_click(|_, window, _| window.zoom_window()),
             )
         })
         .child(
-            window_button("close", Icon::Close, rgb(0xc4_2b_1c))
+            window_button("close", Icon::Close, theme.close_hover, theme.close_icon)
                 .when(round_top_right, |this| this.rounded_tr(ROUNDING))
                 .on_click(|_, window, _| window.remove_window()),
         )
 }
 
-fn window_button(id: &'static str, icon: Icon, hover: Rgba) -> gpui::Stateful<Div> {
+/// A window button showing `icon` in `color`, on `hover` under the mouse.
+fn window_button(id: &'static str, icon: Icon, hover: Rgba, color: Rgba) -> gpui::Stateful<Div> {
     div()
         .id(id)
         .flex()
@@ -200,14 +192,15 @@ fn window_button(id: &'static str, icon: Icon, hover: Rgba) -> gpui::Stateful<Di
         .child(
             canvas(
                 |_, _, _| {},
-                move |bounds, (), window, _| paint_icon(icon, bounds, window),
+                move |bounds, (), window, _| paint_icon(icon, color, bounds, window),
             )
             .size(ICON_SIZE),
         )
 }
 
-/// Draws `icon` with thin lines in `bounds`, a square of [`ICON_SIZE`].
-fn paint_icon(icon: Icon, bounds: Bounds<Pixels>, window: &mut Window) {
+/// Draws `icon` with thin lines of `color` in `bounds`, a square of
+/// [`ICON_SIZE`].
+fn paint_icon(icon: Icon, color: Rgba, bounds: Bounds<Pixels>, window: &mut Window) {
     // The points are on a 12 × 12 grid, at the centers of the pixels so that
     // the 1 px lines stay sharp.
     let lines: &[[(f32, f32); 2]] = match icon {
@@ -231,10 +224,6 @@ fn paint_icon(icon: Icon, bounds: Bounds<Pixels>, window: &mut Window) {
             [(9.5, 7.5), (7.5, 7.5)],
         ],
         Icon::Close => &[[(2.5, 2.5), (9.5, 9.5)], [(9.5, 2.5), (2.5, 9.5)]],
-    };
-    let color = match icon {
-        Icon::Close => rgb(0xf0_f0_f0),
-        Icon::Minimize | Icon::Maximize | Icon::Restore => rgb(0xd0_d0_d0),
     };
     let origin = bounds.origin;
     let mut builder = PathBuilder::stroke(px(1.));

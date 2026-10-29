@@ -21,6 +21,35 @@ const THUMBNAIL_SIZE: &str = "thumbnail_size";
 const SHOW_HIDDEN_FILES: &str = "show_hidden_files";
 const IMAGE_CACHE_MIB: &str = "image_cache_mib";
 const OPEN_COMMAND: &str = "open_command";
+const THEME: &str = "theme";
+
+/// Which colors the application uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThemeChoice {
+    /// Light or dark, as the system is.
+    #[default]
+    System,
+    Dark,
+    Light,
+}
+
+impl ThemeChoice {
+    /// The value in the settings file.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        [Self::System, Self::Dark, Self::Light]
+            .into_iter()
+            .find(|choice| choice.name() == name)
+    }
+}
 
 /// The settings of the application.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +63,7 @@ pub struct Settings {
     /// The command that opens a file with another application, where
     /// `<path>` stands for the file.
     pub open_command: String,
+    pub theme: ThemeChoice,
 }
 
 impl Default for Settings {
@@ -43,6 +73,7 @@ impl Default for Settings {
             show_hidden_files: false,
             image_cache_mib: 1024,
             open_command: platform::DEFAULT_OPEN_COMMAND.to_owned(),
+            theme: ThemeChoice::default(),
         }
     }
 }
@@ -102,6 +133,11 @@ impl Settings {
                         .filter(|command| !command.trim().is_empty())
                         .map(|command| command.clone_into(&mut settings.open_command))
                         .ok_or_else(|| "a command, such as \"xdg-open <path>\"".to_owned()),
+                    THEME => value
+                        .and_then(Value::as_str)
+                        .and_then(ThemeChoice::from_name)
+                        .map(|theme| settings.theme = theme)
+                        .ok_or_else(|| "\"system\", \"dark\" or \"light\"".to_owned()),
                     _ => {
                         errors.push(format!("Unknown setting \"{key}\"."));
                         continue;
@@ -147,6 +183,9 @@ impl Settings {
         }
         if current.open_command != self.open_command {
             set(&mut document, OPEN_COMMAND, self.open_command.as_str());
+        }
+        if current.theme != self.theme {
+            set(&mut document, THEME, self.theme.name());
         }
         Ok(document.to_string())
     }
@@ -215,7 +254,8 @@ mod tests {
             "thumbnail_size = 256\n\
              show_hidden_files = true\n\
              image_cache_mib = 2048\n\
-             open_command = \"gimp <path>\"\n",
+             open_command = \"gimp <path>\"\n\
+             theme = \"light\"\n",
         );
         assert_eq!(
             settings,
@@ -224,6 +264,7 @@ mod tests {
                 show_hidden_files: true,
                 image_cache_mib: 2048,
                 open_command: "gimp <path>".to_owned(),
+                theme: ThemeChoice::Light,
             }
         );
         assert_eq!(errors, Vec::<String>::new());
@@ -254,6 +295,25 @@ mod tests {
         );
         assert_eq!(errors.len(), 3, "{errors:?}");
         assert!(errors[0].contains("\"thumbnail_size\" must be a whole number from 64 to 512"));
+    }
+
+    #[test]
+    fn unknown_theme_keeps_the_default() {
+        let (settings, errors) = Settings::parse("theme = \"blue\"\n");
+        assert_eq!(settings.theme, ThemeChoice::System);
+        assert_eq!(
+            errors,
+            ["\"theme\" must be \"system\", \"dark\" or \"light\". The default is used."]
+        );
+    }
+
+    #[test]
+    fn theme_is_written_by_name() {
+        let settings = Settings {
+            theme: ThemeChoice::Dark,
+            ..Settings::default()
+        };
+        assert_eq!(settings.merge_into("").unwrap(), "theme = \"dark\"\n");
     }
 
     #[test]

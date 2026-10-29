@@ -8,9 +8,11 @@ use gpui::{
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding,
     LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
     ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div,
-    fill, point, prelude::*, px, relative, rgb, rgba, size,
+    fill, point, prelude::*, px, relative, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
+
+use crate::theme::theme;
 
 /// The key context of a text field, for its key bindings.
 const CONTEXT: &str = "TextInput";
@@ -531,6 +533,7 @@ impl Element for TextElement {
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
         let style = window.text_style();
+        let theme = theme(cx);
         let run = TextRun {
             len: content.len(),
             font: style.font(),
@@ -578,7 +581,7 @@ impl Element for TextElement {
                         point(bounds.left() + cursor_x, bounds.top()),
                         size(px(1.5), bounds.bottom() - bounds.top()),
                     ),
-                    rgb(0xd0_d0_d0),
+                    theme.text,
                 )),
             )
         } else {
@@ -594,7 +597,7 @@ impl Element for TextElement {
                             bounds.bottom(),
                         ),
                     ),
-                    rgba(0x5b_9b_e0_60),
+                    theme.selection,
                 )),
                 None,
             )
@@ -681,11 +684,11 @@ impl Render for TextInput {
             .rounded_sm()
             .border_1()
             .border_color(if focused {
-                rgb(0x5b_9b_e0)
+                theme(cx).accent
             } else {
-                rgb(0x44_44_44)
+                theme(cx).input_border
             })
-            .bg(rgb(0x14_14_14))
+            .bg(theme(cx).tab_bar)
             .child(TextElement { input: cx.entity() })
     }
 }

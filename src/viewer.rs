@@ -11,12 +11,13 @@ use deltaflens_core::{
 use gpui::{
     Bounds, Context, CursorStyle, DispatchPhase, Entity, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, RenderImage, ScrollDelta, ScrollEvent, SharedString,
-    Task, Window, canvas, div, point, prelude::*, px, rgb, size,
+    Task, Window, canvas, div, point, prelude::*, px, size,
 };
 
 use crate::{
     images::{ImageKey, Images, ImagesEvent, Picture, Request},
     settings::SettingsStore,
+    theme::theme,
 };
 
 /// How much one wheel notch zooms.
@@ -515,7 +516,7 @@ impl Render for Viewer {
                         .items_center()
                         .justify_center()
                         .p_4()
-                        .text_color(rgb(0xd0_d0_d0))
+                        .text_color(theme(cx).text)
                         .child(error),
                 )
             })

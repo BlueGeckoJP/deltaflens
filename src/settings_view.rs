@@ -1,9 +1,10 @@
-use deltaflens_core::{IMAGE_CACHE_MIBS, Settings, THUMBNAIL_SIZES};
-use gpui::{AnyElement, Context, Entity, SharedString, Window, div, prelude::*, px, rgb};
+use deltaflens_core::{IMAGE_CACHE_MIBS, Settings, THUMBNAIL_SIZES, ThemeChoice};
+use gpui::{AnyElement, Context, Entity, SharedString, Window, div, prelude::*, px};
 
 use crate::{
     settings::SettingsStore,
     text_input::{Submitted, TextInput},
+    theme::{Theme, theme},
 };
 
 /// How much one press of a button changes the size of thumbnails.
@@ -52,7 +53,34 @@ impl SettingsView {
     }
 
     /// The size of thumbnails, changed in steps of [`THUMBNAIL_SIZE_STEP`].
-    fn render_thumbnail_size(size: u32, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Light, dark, or as the system is.
+    fn render_theme(
+        choice: ThemeChoice,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let option = |id: &'static str, label: &'static str, value: ThemeChoice| {
+            button(
+                id,
+                label,
+                true,
+                choice == value,
+                theme,
+                cx.listener(move |this, _, _, cx| this.change(|s| s.theme = value, cx)),
+            )
+        };
+        row(
+            "Theme",
+            div()
+                .flex()
+                .gap_2()
+                .child(option("theme-system", "System", ThemeChoice::System))
+                .child(option("theme-dark", "Dark", ThemeChoice::Dark))
+                .child(option("theme-light", "Light", ThemeChoice::Light)),
+        )
+    }
+
+    fn render_thumbnail_size(size: u32, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let (min, max) = (*THUMBNAIL_SIZES.start(), *THUMBNAIL_SIZES.end());
         let smaller = size.saturating_sub(THUMBNAIL_SIZE_STEP).max(min);
         let larger = (size + THUMBNAIL_SIZE_STEP).min(max);
@@ -63,6 +91,7 @@ impl SettingsView {
                 format!("{size} px"),
                 size > min,
                 size < max,
+                theme,
                 cx.listener(move |this, _, _, cx| {
                     this.change(|s| s.thumbnail_size = smaller, cx);
                 }),
@@ -74,7 +103,7 @@ impl SettingsView {
     }
 
     /// The memory for decoded images, halved or doubled.
-    fn render_image_cache(mib: u32, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_image_cache(mib: u32, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let (min, max) = (*IMAGE_CACHE_MIBS.start(), *IMAGE_CACHE_MIBS.end());
         let smaller = (mib / 2).max(min);
         let larger = mib.saturating_mul(2).min(max);
@@ -85,6 +114,7 @@ impl SettingsView {
                 format!("{mib} MiB"),
                 mib > min,
                 mib < max,
+                theme,
                 cx.listener(move |this, _, _, cx| {
                     this.change(|s| s.image_cache_mib = smaller, cx);
                 }),
@@ -109,6 +139,7 @@ impl Render for SettingsView {
         let thumbnail_size = settings.thumbnail_size;
         let image_cache_mib = settings.image_cache_mib;
         let show_hidden = settings.show_hidden_files;
+        let theme = theme(cx);
         div()
             .id("settings")
             .size_full()
@@ -117,12 +148,12 @@ impl Render for SettingsView {
             .flex()
             .flex_col()
             .gap_4()
-            .text_color(rgb(0xd0_d0_d0))
+            .text_color(theme.text)
             .child(div().text_xl().child("Settings"))
             .child(
                 div()
                     .text_sm()
-                    .text_color(rgb(0x90_90_90))
+                    .text_color(theme.text_muted)
                     .child(format!("Saved in {path}")),
             )
             .children(errors.into_iter().map(|error| {
@@ -130,22 +161,26 @@ impl Render for SettingsView {
                     .px_3()
                     .py_2()
                     .rounded_sm()
-                    .bg(rgb(0x4a_22_22))
+                    .bg(theme.error_background)
+                    .text_color(theme.error_text)
                     .child(error)
             }))
-            .child(Self::render_thumbnail_size(thumbnail_size, cx))
+            .child(Self::render_theme(settings.theme, &theme, cx))
+            .child(Self::render_thumbnail_size(thumbnail_size, &theme, cx))
             .child(row(
                 "Show hidden files",
                 button(
                     "show-hidden",
                     if show_hidden { "On" } else { "Off" },
                     true,
+                    false,
+                    &theme,
                     cx.listener(move |this, _, _, cx| {
                         this.change(|s| s.show_hidden_files = !show_hidden, cx);
                     }),
                 ),
             ))
-            .child(Self::render_image_cache(image_cache_mib, cx))
+            .child(Self::render_image_cache(image_cache_mib, &theme, cx))
             .child(row(
                 "Open with (<path> is the file; Enter to apply)",
                 div().w(px(320.)).child(self.open_command.clone()),
@@ -173,6 +208,7 @@ fn stepper(
     value: String,
     can_decrease: bool,
     can_increase: bool,
+    theme: &Theme,
     decrease: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
     increase: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> AnyElement {
@@ -187,6 +223,8 @@ fn stepper(
             SharedString::from(format!("{id}-decrease")),
             "−",
             can_decrease,
+            false,
+            theme,
             decrease,
         ))
         .child(div().w(px(96.)).flex().justify_center().child(value))
@@ -194,27 +232,38 @@ fn stepper(
             SharedString::from(format!("{id}-increase")),
             "+",
             can_increase,
+            false,
+            theme,
             increase,
         ))
         .into_any_element()
 }
 
+/// A button, outlined when `selected`.
 fn button(
     id: impl Into<gpui::ElementId>,
     label: &'static str,
     enabled: bool,
+    selected: bool,
+    theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
+    let hover = theme.element_hover;
     div()
         .id(id)
         .px_3()
         .py_1()
         .rounded_sm()
-        .bg(rgb(0x2a_2a_2a))
-        .when(enabled, |this| {
-            this.hover(|style| style.bg(rgb(0x3a_3a_3a)))
-                .on_click(on_click)
+        .border_1()
+        .border_color(if selected {
+            theme.accent
+        } else {
+            theme.element
         })
-        .when(!enabled, |this| this.text_color(rgb(0x60_60_60)))
+        .bg(theme.element)
+        .when(enabled, |this| {
+            this.hover(move |style| style.bg(hover)).on_click(on_click)
+        })
+        .when(!enabled, |this| this.text_color(theme.text_disabled))
         .child(label)
 }

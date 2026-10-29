@@ -11,8 +11,8 @@ use eyre::{Result, eyre};
 use gpui::{
     AnyElement, Bounds, ClickEvent, Context, CursorStyle, DragMoveEvent, ElementId, Entity,
     FocusHandle, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions,
-    Pixels, Point, SharedString, Window, actions, anchored, deferred, div, prelude::*, px,
-    relative, rgb, rgba,
+    Pixels, Point, Rgba, SharedString, Window, actions, anchored, deferred, div, prelude::*, px,
+    relative,
 };
 
 use crate::{
@@ -20,6 +20,7 @@ use crate::{
     images::Images,
     settings::SettingsStore,
     settings_view::SettingsView,
+    theme::{Theme, theme},
     thumbnails::Thumbnails,
     viewer::Viewer,
     window_frame::{self, ROUNDING},
@@ -67,10 +68,6 @@ const TAB_BAR_HEIGHT: Pixels = px(36.);
 /// when the tabs fill the bar.
 const MIN_DRAG_WIDTH: Pixels = px(48.);
 
-/// The color that marks the focused pane, on its active tab.
-const FOCUS_COLOR: u32 = 0x5b_9b_e0;
-/// The color of the lines between panes.
-const DIVIDER_COLOR: u32 = 0x2a_2a_2a;
 /// The width of the area around a line between panes that can be dragged.
 const DIVIDER_HANDLE_WIDTH: Pixels = px(6.);
 /// The smallest width and height of a pane when dragging a line between panes.
@@ -90,12 +87,6 @@ struct DraggedTab {
     label: SharedString,
 }
 
-/// The background of the tab, or of the empty part of a tab bar, that a
-/// dragged tab is dropped before (or at the end of).
-const DROP_TARGET_COLOR: u32 = 0x2a_3a_4a;
-/// The part of a pane that a dragged tab or image would take, shown over it.
-const DROP_ZONE_COLOR: u32 = 0x5b_9b_e0_40;
-
 /// What follows the mouse while dragging: the name of a tab, or nothing for a
 /// line between panes.
 struct DragPreview {
@@ -103,14 +94,15 @@ struct DragPreview {
 }
 
 impl Render for DragPreview {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = theme(cx);
         div().when_some(self.label.clone(), |this, label| {
             this.px_3()
                 .py_1()
                 .rounded_sm()
-                .bg(rgb(0x2a_2a_2a))
+                .bg(theme.element)
                 .text_sm()
-                .text_color(rgb(0xe0_e0_e0))
+                .text_color(theme.text_strong)
                 .child(label)
         })
     }
@@ -187,14 +179,23 @@ impl WorkspaceView {
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
         let settings = cx.new(SettingsStore::new);
-        // Show errors in the settings as they come and go.
-        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        // Show errors in the settings as they come and go, and follow the
+        // theme.
+        cx.observe_in(&settings, window, |this, _, window, cx| {
+            this.update_theme(window, cx);
+            cx.notify();
+        })
+        .detach();
+        cx.observe_window_appearance(window, Self::update_theme)
+            .detach();
         // Keys would reach no action once the focused element is gone, such as
         // a text field in a tab that is no longer shown.
         cx.on_focus_lost(window, |this, window, cx| {
             window.focus(&this.focus_handle, cx);
         })
         .detach();
+        let theme = Theme::for_choice(settings.read(cx).settings().theme, window.appearance());
+        cx.set_global(theme);
         Self {
             workspace: Workspace::new(),
             views: HashMap::new(),
@@ -449,6 +450,17 @@ impl WorkspaceView {
     #[expect(clippy::unused_self, reason = "`cx.listener` takes a method")]
     fn open(&mut self, _: &Open, window: &mut Window, cx: &mut Context<Self>) {
         Self::prompt_for_image(window, cx, Self::open_in_active_tab);
+    }
+
+    /// Uses the theme of the settings, which may follow the appearance of
+    /// the system.
+    fn update_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let choice = self.settings.read(cx).settings().theme;
+        let new = Theme::for_choice(choice, window.appearance());
+        if cx.try_global::<Theme>() != Some(&new) {
+            cx.set_global(new);
+            cx.refresh_windows();
+        }
     }
 
     /// Shows the settings tab, opening it in the focused pane if there is
@@ -762,13 +774,14 @@ impl WorkspaceView {
     }
 
     fn render_tab_menu(menu: &TabMenu, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = theme(cx);
         let item = |id: &'static str, label: &'static str| {
             div()
                 .id(id)
                 .px_3()
                 .py_1()
                 .rounded_sm()
-                .hover(|style| style.bg(rgb(0x3a_3a_3a)))
+                .hover(move |style| style.bg(theme.element_hover))
                 .child(label)
         };
         let (pane_id, tab_id) = (menu.pane_id, menu.tab_id);
@@ -788,10 +801,10 @@ impl WorkspaceView {
             .p_1()
             .rounded_md()
             .border_1()
-            .border_color(rgb(0x3a_3a_3a))
-            .bg(rgb(0x24_24_24))
+            .border_color(theme.menu_border)
+            .bg(theme.menu)
             .text_sm()
-            .text_color(rgb(0xd0_d0_d0))
+            .text_color(theme.text)
             .shadow_md()
             // Keep clicks on the menu from reaching the tabs under it.
             .occlude()
@@ -953,7 +966,7 @@ impl WorkspaceView {
                         child_path.push(index);
                         let cell = div()
                             .overflow_hidden()
-                            .border_color(rgb(DIVIDER_COLOR))
+                            .border_color(theme(cx).border)
                             .child(self.render_layout(child, &child_path, title_bar, window, cx));
                         // A line on the leading side of every child but the first.
                         let has_divider = index > 0;
@@ -990,6 +1003,7 @@ impl WorkspaceView {
             boundary,
         };
         let equalize_path = path.to_vec();
+        let accent = theme(cx).accent;
         let handle = div()
             .id(ElementId::Name(
                 format!("divider-{path:?}-{boundary}").into(),
@@ -998,7 +1012,7 @@ impl WorkspaceView {
             // Keep presses on the line from also panning a viewer or moving the
             // window under it.
             .occlude()
-            .hover(|style| style.bg(rgb(FOCUS_COLOR)))
+            .hover(move |style| style.bg(accent))
             .on_drag(dragged, |_, _, _, cx| {
                 cx.new(|_| DragPreview { label: None })
             })
@@ -1052,7 +1066,7 @@ impl WorkspaceView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_color(rgb(0x80_80_80))
+                .text_color(theme(cx).text_placeholder)
                 .child("Ctrl+N: open a folder, Ctrl+O: open an image")
                 .into_any_element(),
         };
@@ -1124,7 +1138,9 @@ impl WorkspaceView {
                 }),
             )
             .child(content)
-            .when_some(zone, |this, zone| this.child(render_drop_zone(zone)))
+            .when_some(zone, |this, zone| {
+                this.child(render_drop_zone(zone, theme(cx).drop_zone))
+            })
     }
 
     /// `marked` is the active tab of the focused pane, when the focus is worth
@@ -1160,7 +1176,7 @@ impl WorkspaceView {
             .flex_shrink_0()
             .w_full()
             .h(TAB_BAR_HEIGHT)
-            .bg(rgb(0x14_14_14))
+            .bg(theme(cx).tab_bar)
             .text_sm()
             .when(round_top_left, |this| this.rounded_tl(ROUNDING))
             .when(round_top_right, |this| this.rounded_tr(ROUNDING))
@@ -1173,7 +1189,7 @@ impl WorkspaceView {
                 cx,
             ))
             .when(title_bar.is_some_and(|part| part.controls), |this| {
-                this.child(window_frame::window_controls(window, round_top_right))
+                this.child(window_frame::window_controls(window, round_top_right, cx))
             })
     }
 
@@ -1186,6 +1202,7 @@ impl WorkspaceView {
     ) -> AnyElement {
         let tab_id = tab.id();
         let label = SharedString::from(tab_name(tab));
+        let theme = theme(cx);
         div()
             .id(("tab", index))
             .when(look.round_top_left, |this| this.rounded_tl(ROUNDING))
@@ -1198,9 +1215,17 @@ impl WorkspaceView {
             .pl_3()
             .pr_1()
             .border_r_1()
-            .border_color(rgb(0x2a_2a_2a))
-            .bg(rgb(if look.active { 0x1e_1e_1e } else { 0x14_14_14 }))
-            .text_color(rgb(if look.active { 0xe0_e0_e0 } else { 0x90_90_90 }))
+            .border_color(theme.border)
+            .bg(if look.active {
+                theme.background
+            } else {
+                theme.tab_bar
+            })
+            .text_color(if look.active {
+                theme.text_strong
+            } else {
+                theme.text_muted
+            })
             .relative()
             .when(look.marked, |this| {
                 this.child(
@@ -1210,7 +1235,7 @@ impl WorkspaceView {
                         .left_0()
                         .w_full()
                         .h(px(2.))
-                        .bg(rgb(FOCUS_COLOR)),
+                        .bg(theme.accent),
                 )
             })
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -1229,8 +1254,8 @@ impl WorkspaceView {
                     })
                 },
             )
-            .drag_over::<DraggedTab>(|style, _, _, _| style.bg(rgb(DROP_TARGET_COLOR)))
-            .drag_over::<DraggedImage>(|style, _, _, _| style.bg(rgb(DROP_TARGET_COLOR)))
+            .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(theme.drop_target))
+            .drag_over::<DraggedImage>(move |style, _, _, _| style.bg(theme.drop_target))
             .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
                 this.move_tab(dragged, pane_id, index, cx);
             }))
@@ -1263,7 +1288,7 @@ impl WorkspaceView {
                     .flex_shrink_0()
                     .px_1()
                     .rounded_sm()
-                    .hover(|style| style.bg(rgb(0x3a_3a_3a)))
+                    .hover(move |style| style.bg(theme.element_hover))
                     .child("×")
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         cx.stop_propagation();
@@ -1284,12 +1309,13 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let controls = window.window_controls();
+        let theme = theme(cx);
         let rest = div()
             .id(ElementId::Name(format!("tab-bar-rest-{pane_id:?}").into()))
             .flex_1()
             .h_full()
-            .drag_over::<DraggedTab>(|style, _, _, _| style.bg(rgb(DROP_TARGET_COLOR)))
-            .drag_over::<DraggedImage>(|style, _, _, _| style.bg(rgb(DROP_TARGET_COLOR)))
+            .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(theme.drop_target))
+            .drag_over::<DraggedImage>(move |style, _, _, _| style.bg(theme.drop_target))
             .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
                 this.move_tab(dragged, pane_id, tab_count, cx);
             }))
@@ -1338,8 +1364,10 @@ impl WorkspaceView {
 
 /// The part of a pane that a drop in `zone` would take: all of it, or the half
 /// on that side.
-fn render_drop_zone(zone: DropZone) -> impl IntoElement {
-    let overlay = div().absolute().bg(rgba(DROP_ZONE_COLOR));
+/// The part of a pane that a dragged tab or image would take, shown over it
+/// in `color`.
+fn render_drop_zone(zone: DropZone, color: Rgba) -> impl IntoElement {
+    let overlay = div().absolute().bg(color);
     match zone {
         DropZone::Center => overlay.inset_0(),
         DropZone::Edge(Side::Left) => overlay.top_0().left_0().h_full().w_1_2(),
@@ -1423,7 +1451,7 @@ impl Render for WorkspaceView {
                     .with_priority(1),
                 )
             });
-        window_frame::window_frame(content, window)
+        window_frame::window_frame(content, window, cx)
     }
 }
 
@@ -1443,8 +1471,8 @@ impl WorkspaceView {
                 .px_3()
                 .py_1()
                 .text_sm()
-                .bg(rgb(0x4a_22_22))
-                .text_color(rgb(0xf0_c0_c0))
+                .bg(theme(cx).error_background)
+                .text_color(theme(cx).error_text)
                 .child(format!(
                     "Settings: {first}{more} Ctrl+, shows the settings."
                 )),

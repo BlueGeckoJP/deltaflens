@@ -35,7 +35,7 @@ pub use layout::{Axis, DropZone, Layout, Side, drop_zone};
 pub use lru::LruCache;
 pub use pane::Pane;
 pub use preset::Preset;
-pub use settings::{IMAGE_CACHE_MIBS, Settings, THUMBNAIL_SIZES};
+pub use settings::{IMAGE_CACHE_MIBS, Settings, THUMBNAIL_SIZES, ThemeChoice};
 pub use tab::{Tab, TabContent};
 pub use tiles::{TileRect, cut_tiles, overview_size, tile_rects, visible_tiles};
 pub use view::{Point, Rect, Size, ViewTransform};

@@ -11,13 +11,14 @@ use deltaflens_core::{
 use eyre::eyre;
 use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, MouseButton,
-    MouseDownEvent, NavigationDirection, ObjectFit, Pixels, Point, ScrollStrategy, SharedString,
-    Task, UniformListScrollHandle, Window, anchored, container_query, deferred, div, img,
-    prelude::*, px, rgb, uniform_list,
+    MouseDownEvent, NavigationDirection, ObjectFit, Pixels, Point, Rgba, ScrollStrategy,
+    SharedString, Task, UniformListScrollHandle, Window, anchored, container_query, deferred, div,
+    img, prelude::*, px, uniform_list,
 };
 
 use crate::{
     settings::SettingsStore,
+    theme::{Theme, theme},
     thumbnails::{ThumbnailKey, Thumbnails},
 };
 
@@ -39,14 +40,15 @@ struct DraggedImagePreview {
 }
 
 impl Render for DraggedImagePreview {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = theme(cx);
         div()
             .px_3()
             .py_1()
             .rounded_sm()
-            .bg(rgb(0x2a_2a_2a))
+            .bg(theme.element)
             .text_sm()
-            .text_color(rgb(0xe0_e0_e0))
+            .text_color(theme.text_strong)
             .child(self.name.clone())
     }
 }
@@ -302,13 +304,14 @@ impl Explorer {
             .next()
             .unwrap_or_default()
             .to_owned();
+        let theme = theme(cx);
         let item = |id: &'static str, label: String| {
             div()
                 .id(id)
                 .px_3()
                 .py_1()
                 .rounded_sm()
-                .hover(|style| style.bg(rgb(0x3a_3a_3a)))
+                .hover(move |style| style.bg(theme.element_hover))
                 .child(label)
         };
         let open_path = menu.path.clone();
@@ -321,10 +324,10 @@ impl Explorer {
             .p_1()
             .rounded_md()
             .border_1()
-            .border_color(rgb(0x3a_3a_3a))
-            .bg(rgb(0x24_24_24))
+            .border_color(theme.menu_border)
+            .bg(theme.menu)
             .text_sm()
-            .text_color(rgb(0xd0_d0_d0))
+            .text_color(theme.text)
             .shadow_md()
             .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
                 this.context_menu = None;
@@ -350,6 +353,7 @@ impl Explorer {
     }
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = theme(cx);
         div()
             .flex()
             .flex_shrink_0()
@@ -357,26 +361,29 @@ impl Explorer {
             .gap_1()
             .h(px(36.))
             .px_2()
-            .bg(rgb(0x18_18_18))
+            .bg(theme.toolbar)
             .border_b_1()
-            .border_color(rgb(0x2a_2a_2a))
+            .border_color(theme.border)
             .child(nav_button(
                 "back",
                 "←",
                 self.history.can_go_back(),
                 cx.listener(|this, _: &ClickEvent, _, cx| this.go_back(cx)),
+                &theme,
             ))
             .child(nav_button(
                 "forward",
                 "→",
                 self.history.can_go_forward(),
                 cx.listener(|this, _: &ClickEvent, _, cx| this.go_forward(cx)),
+                &theme,
             ))
             .child(nav_button(
                 "up",
                 "↑",
                 self.dir().parent().is_some(),
                 cx.listener(|this, _: &ClickEvent, _, cx| this.go_up(cx)),
+                &theme,
             ))
             .child(self.render_path_bar(cx))
             .child(self.render_sort_buttons(cx))
@@ -388,6 +395,7 @@ impl Explorer {
         let mut ancestors: Vec<&Path> = self.dir().ancestors().collect();
         ancestors.reverse();
         let last = ancestors.len().saturating_sub(1);
+        let theme = theme(cx);
         div()
             .id("path-bar")
             .flex()
@@ -408,7 +416,7 @@ impl Explorer {
                     .flex_shrink_0()
                     .items_center()
                     .when(index > 0, |this| {
-                        this.child(div().px_0p5().text_color(rgb(0x60_60_60)).child("›"))
+                        this.child(div().px_0p5().text_color(theme.text_disabled).child("›"))
                     })
                     .child(
                         div()
@@ -416,12 +424,12 @@ impl Explorer {
                             .px_1p5()
                             .py_0p5()
                             .rounded_sm()
-                            .text_color(rgb(if index == last {
-                                0xe0_e0_e0
+                            .text_color(if index == last {
+                                theme.text_strong
                             } else {
-                                0xa0_a0_a0
-                            }))
-                            .hover(|style| style.bg(rgb(0x2a_2a_2a)))
+                                theme.text_muted
+                            })
+                            .hover(move |style| style.bg(theme.element))
                             .child(name)
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 this.navigate(target.clone(), cx);
@@ -433,8 +441,9 @@ impl Explorer {
     /// Chooses the sort key, and toggles the order.
     fn render_sort_buttons(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let sort = self.sort;
+        let theme = theme(cx);
         let key_button = |key: SortKey, label: &'static str, cx: &mut Context<Self>| {
-            toolbar_button(label, sort.key == key)
+            toolbar_button(label, sort.key == key, &theme)
                 .id(label)
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.set_sort(Sort { key, ..sort }, cx);
@@ -454,7 +463,7 @@ impl Explorer {
             .child(key_button(SortKey::Name, "Name", cx))
             .child(key_button(SortKey::Modified, "Modified", cx))
             .child(
-                toolbar_button(order_label, false)
+                toolbar_button(order_label, false, &theme)
                     .id("order")
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.set_sort(
@@ -484,7 +493,7 @@ impl Explorer {
             .items_center()
             .justify_center()
             .p_4()
-            .text_color(rgb(0x80_80_80))
+            .text_color(theme(cx).text_placeholder)
             .children(message)
             .into_any_element()
     }
@@ -548,8 +557,9 @@ impl Explorer {
             .to_string_lossy()
             .into_owned();
         let name_for_preview = name.clone();
+        let theme = theme(cx);
         let icon = match entry.kind {
-            EntryKind::Folder => folder_icon(icon_size).into_any_element(),
+            EntryKind::Folder => folder_icon(icon_size, theme.folder).into_any_element(),
             EntryKind::Image => {
                 let key = ThumbnailKey {
                     path: entry.path.clone(),
@@ -564,7 +574,7 @@ impl Explorer {
                         .size_full()
                         .object_fit(ObjectFit::Contain)
                         .into_any_element(),
-                    None => image_placeholder(&entry.path, icon_size).into_any_element(),
+                    None => image_placeholder(&entry.path, icon_size, &theme).into_any_element(),
                 }
             }
         };
@@ -579,7 +589,7 @@ impl Explorer {
             .h(px(icon_size + CELL_EXTRA_HEIGHT))
             .p_1()
             .rounded_md()
-            .hover(|style| style.bg(rgb(0x2a_2a_2a)))
+            .hover(move |style| style.bg(theme.element))
             .child(
                 div()
                     .flex()
@@ -597,7 +607,7 @@ impl Explorer {
                     .text_ellipsis_middle()
                     .text_center()
                     .text_sm()
-                    .text_color(rgb(0xd0_d0_d0))
+                    .text_color(theme.text)
                     .child(name),
             )
             // A double click opens the entry. A single click does nothing
@@ -654,9 +664,9 @@ impl Render for Explorer {
                         .flex_shrink_0()
                         .px_3()
                         .py_1()
-                        .bg(rgb(0x3a_1e_1e))
+                        .bg(theme(cx).error_background)
                         .text_sm()
-                        .text_color(rgb(0xf0_c0_c0))
+                        .text_color(theme(cx).error_text)
                         .child(notice),
                 )
             })
@@ -685,14 +695,23 @@ fn column_count(width: Pixels, cell_width: f32) -> usize {
 }
 
 /// A text button in the toolbar, highlighted when `selected`.
-fn toolbar_button(label: &'static str, selected: bool) -> gpui::Div {
+fn toolbar_button(label: &'static str, selected: bool, theme: &Theme) -> gpui::Div {
+    let hover = theme.element;
     div()
         .px_2()
         .py_0p5()
         .rounded_sm()
-        .bg(rgb(if selected { 0x33_33_33 } else { 0x18_18_18 }))
-        .text_color(rgb(if selected { 0xe0_e0_e0 } else { 0xa0_a0_a0 }))
-        .hover(|style| style.bg(rgb(0x2a_2a_2a)))
+        .bg(if selected {
+            theme.element_hover
+        } else {
+            theme.toolbar
+        })
+        .text_color(if selected {
+            theme.text_strong
+        } else {
+            theme.text_muted
+        })
+        .hover(move |style| style.bg(hover))
         .child(label)
 }
 
@@ -701,7 +720,9 @@ fn nav_button(
     label: &'static str,
     enabled: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    theme: &Theme,
 ) -> impl IntoElement {
+    let hover = theme.element;
     div()
         .id(id)
         .flex()
@@ -710,18 +731,20 @@ fn nav_button(
         .justify_center()
         .size(px(26.))
         .rounded_sm()
-        .text_color(rgb(if enabled { 0xd0_d0_d0 } else { 0x50_50_50 }))
+        .text_color(if enabled {
+            theme.text
+        } else {
+            theme.text_disabled
+        })
         .when(enabled, |this| {
-            this.hover(|style| style.bg(rgb(0x2a_2a_2a)))
-                .on_click(on_click)
+            this.hover(move |style| style.bg(hover)).on_click(on_click)
         })
         .child(label)
 }
 
-/// A folder drawn with plain shapes, so that no icon font is needed, for an
-/// icon of `size`.
-fn folder_icon(size: f32) -> impl IntoElement {
-    let color = rgb(0xc8_a0_4a);
+/// A folder drawn with plain shapes in `color`, so that no icon font is
+/// needed, for an icon of `size`.
+fn folder_icon(size: f32, color: Rgba) -> impl IntoElement {
     // Drawn for 128 pixels.
     let scale = size / 128.;
     div()
@@ -747,7 +770,7 @@ fn folder_icon(size: f32) -> impl IntoElement {
 
 /// Stands in for the thumbnail until it is ready, or if the image cannot be
 /// decoded: the extension of the image in a frame, for an icon of `size`.
-fn image_placeholder(path: &Path, size: f32) -> impl IntoElement {
+fn image_placeholder(path: &Path, size: f32, theme: &Theme) -> impl IntoElement {
     let extension = path
         .extension()
         .unwrap_or_default()
@@ -760,9 +783,9 @@ fn image_placeholder(path: &Path, size: f32) -> impl IntoElement {
         .size(px(size * 0.75))
         .rounded_md()
         .border_1()
-        .border_color(rgb(0x50_50_50))
-        .bg(rgb(0x26_26_26))
+        .border_color(theme.placeholder_border)
+        .bg(theme.placeholder)
         .text_xs()
-        .text_color(rgb(0x90_90_90))
+        .text_color(theme.text_muted)
         .child(extension)
 }

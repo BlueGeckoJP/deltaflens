@@ -4,6 +4,7 @@ mod render_image;
 mod settings;
 mod settings_view;
 mod text_input;
+mod theme;
 mod thumbnails;
 mod viewer;
 mod window_frame;
