@@ -329,6 +329,8 @@ impl Explorer {
             .text_sm()
             .text_color(theme.text)
             .shadow_md()
+            // Keep clicks on the menu from reaching the entries under it.
+            .occlude()
             .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
                 this.context_menu = None;
                 cx.notify();
