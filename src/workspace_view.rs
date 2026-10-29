@@ -172,9 +172,9 @@ pub struct WorkspaceView {
     tab_menu: Option<TabMenu>,
     /// Where a tab or image dragged over a pane would go.
     drop_target: Option<(PaneId, DropZone)>,
-    /// The session last saved, to save it again only when it changes. `None`
-    /// until the session is restored, so that the saved one is not replaced
-    /// before.
+    /// The session last saved or tried to, to save it again only when it
+    /// changes. `None` until the session is restored, so that the saved one
+    /// is not replaced before.
     saved_session: Option<Session>,
 }
 
@@ -252,9 +252,10 @@ impl WorkspaceView {
         any_tab
     }
 
-    /// Saves the session in the background if it changed since it was last
-    /// saved.
-    fn save_session(&mut self, cx: &mut Context<Self>) {
+    /// Saves the session if it changed since it was last saved. The file is
+    /// small, so it is written at once, which keeps saves from overlapping.
+    /// A save that fails is tried again on the next change.
+    fn save_session(&mut self) {
         let Some(saved) = &self.saved_session else {
             return;
         };
@@ -262,16 +263,14 @@ impl WorkspaceView {
         if *saved == session {
             return;
         }
-        self.saved_session = Some(session.clone());
         let Some(path) = Session::path() else {
             return;
         };
-        cx.background_spawn(async move {
-            if let Err(error) = session.save(&path) {
-                tracing::warn!("failed to save the session: {error:#}");
-            }
-        })
-        .detach();
+        if let Err(error) = session.save(&path) {
+            tracing::warn!("failed to save the session: {error:#}");
+        }
+        // Not tried again on every frame, which would repeat the warning.
+        self.saved_session = Some(session);
     }
 
     /// Opens `path` in a new tab of the focused pane: an explorer for a folder,
@@ -1462,7 +1461,7 @@ impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.update_title(window);
         self.update_visibility(cx);
-        self.save_session(cx);
+        self.save_session();
         // A drag that ended outside every pane leaves nothing to show.
         if !cx.has_active_drag() {
             self.drop_target = None;
