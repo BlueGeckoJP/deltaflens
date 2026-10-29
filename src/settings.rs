@@ -63,7 +63,10 @@ impl SettingsStore {
             match self.settings.save(path) {
                 Ok(()) => {
                     self.modified = modified(path);
-                    self.errors.clear();
+                    // Mistakes in other settings of the file are kept by the
+                    // save, so they are still there.
+                    let (_, errors) = Settings::load(path);
+                    self.errors = errors.into_iter().map(SharedString::from).collect();
                 }
                 Err(error) => {
                     let message = format!("Failed to save the settings: {error:#}");

@@ -189,6 +189,12 @@ impl WorkspaceView {
         let settings = cx.new(SettingsStore::new);
         // Show errors in the settings as they come and go.
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        // Keys would reach no action once the focused element is gone, such as
+        // a text field in a tab that is no longer shown.
+        cx.on_focus_lost(window, |this, window, cx| {
+            window.focus(&this.focus_handle, cx);
+        })
+        .detach();
         Self {
             workspace: Workspace::new(),
             views: HashMap::new(),
@@ -1055,17 +1061,17 @@ impl WorkspaceView {
             .flex()
             .flex_col()
             // Pressing anywhere in a pane focuses it, so that keys act on it.
+            // This comes before the elements in the pane, which may stop the
+            // event, such as a text field.
+            .capture_any_mouse_down(
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| this.focus_pane(pane_id, cx)),
+            )
+            // Take the keys back from a text field, unless it was pressed.
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                    // Take the keys back from a text field.
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
                     window.focus(&this.focus_handle, cx);
-                    this.focus_pane(pane_id, cx);
                 }),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, _: &MouseDownEvent, _, cx| this.focus_pane(pane_id, cx)),
             )
             // A pane at the top keeps its tab bar without tabs, to move the
             // window with.
