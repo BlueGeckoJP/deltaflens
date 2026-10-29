@@ -7,7 +7,7 @@ use jxl_oxide::{
     EnumColourEncoding, JxlImage, PixelFormat, RenderingIntent, color::ColourEncoding,
 };
 
-use super::{DecodedImage, convert_to_srgb, limits};
+use super::{DecodedImage, convert_to_srgb, describes_srgb, limits};
 
 /// A bare JPEG XL codestream.
 const CODESTREAM_SIGNATURE: [u8; 2] = [0xff, 0x0a];
@@ -47,6 +47,12 @@ pub(super) fn decode(path: &Path) -> Result<DecodedImage> {
             image.request_color_encoding(srgb);
             None
         }
+        // jxl-oxide renders in the embedded profile, or in sRGB if it cannot,
+        // such as for a profile it cannot write as an enum color encoding in
+        // an image stored in XYB. The profile it makes for the rendered pixels
+        // from an enum color encoding gave wrong colors, so the embedded one
+        // is used.
+        ColourEncoding::IccProfile(_) if describes_srgb(&image.rendered_icc()) => None,
         ColourEncoding::IccProfile(_) => image.original_icc().map(<[u8]>::to_vec),
     };
 
@@ -96,4 +102,38 @@ pub(super) fn decode(path: &Path) -> Result<DecodedImage> {
         height,
         pixels,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name)
+    }
+
+    #[test]
+    fn icc_profile_rendered_as_srgb_is_not_converted_again() {
+        // Lossy, so stored in XYB, with an ICC profile of Display P3 primaries
+        // and tone curves given as tables. jxl-oxide cannot render in it and
+        // renders in sRGB instead.
+        let path = fixture("p3-table-curve-xyb-8x8.jxl");
+        let image = JxlImage::builder().open(&path).unwrap();
+        assert!(describes_srgb(&image.rendered_icc()));
+
+        // The pixels were (234, 51, 35) in the profile.
+        let mut expected = vec![234, 51, 35, 255];
+        convert_to_srgb(&mut expected, image.original_icc().unwrap()).unwrap();
+        let decoded = decode(&path).unwrap();
+        for pixel in decoded.pixels().as_chunks::<4>().0 {
+            let [b, g, r, a] = *pixel;
+            let close = [r, g, b, a]
+                .iter()
+                .zip(&expected)
+                .all(|(&actual, &expected)| actual.abs_diff(expected) <= 6);
+            assert!(close, "{:?} is not close to {expected:?}", [r, g, b, a]);
+        }
+    }
 }

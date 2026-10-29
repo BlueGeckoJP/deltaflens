@@ -82,3 +82,27 @@ encoder.set_icc_profile(icc).unwrap();
 encoder.write_image(&pixels, 8, 8, ExtendedColorType::Rgb8).unwrap();
 std::fs::write("p3-red-8x8.png", png).unwrap();
 ```
+
+`p3-table-curve-xyb-8x8.jxl` is lossy, so stored in XYB, with an ICC profile
+of Display P3 primaries and tone curves given as 64-entry tables of gamma 2.0.
+jxl-oxide cannot write this profile as an enum color encoding, so it renders
+the image in sRGB. The pixels are (234, 51, 35) in the profile. The safe API
+of `jpegxl-rs` cannot set an ICC profile, so it is made with `jpegxl-sys`:
+
+```rust
+let mut profile = moxcms::ColorProfile::new_display_p3();
+let table: Vec<u16> = (0..64)
+    .map(|i| ((i as f64 / 63.0).powf(2.0) * 65535.0).round() as u16)
+    .collect();
+let curve = moxcms::ToneReprCurve::Lut(table);
+profile.red_trc = Some(curve.clone());
+profile.green_trc = Some(curve.clone());
+profile.blue_trc = Some(curve);
+profile.cicp = None;
+let icc = profile.encode().unwrap();
+
+// With jpegxl_sys: JxlEncoderSetBasicInfo with 8 x 8, 8 bits per sample,
+// 3 color channels and `uses_original_profile` false; JxlEncoderSetICCProfile
+// with `icc`; JxlEncoderSetFrameDistance 0.5; then the 8-bit RGB pixels
+// [234, 51, 35] x 64 with JxlEncoderAddImageFrame.
+```

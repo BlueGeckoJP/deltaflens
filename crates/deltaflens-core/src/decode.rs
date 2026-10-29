@@ -9,7 +9,7 @@ use std::path::Path;
 use eyre::{Result, WrapErr};
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
 
-use self::color::convert_to_srgb;
+use self::color::{convert_to_srgb, describes_srgb};
 pub(crate) use self::{encode::encode_png, thumbnail::fit_within};
 pub use self::{thumbnail::thumbnail, thumbnail_cache::ThumbnailCache};
 
