@@ -22,6 +22,8 @@ pub struct Session {
     version: u32,
     /// The index of the focused pane, in the order of [`Layout::pane_ids`].
     focused: usize,
+    /// The index of the destination of new tabs, in the same order.
+    destination: Option<usize>,
     layout: SavedLayout,
 }
 
@@ -72,15 +74,18 @@ impl Session {
     /// out, as the file cannot hold them.
     #[must_use]
     pub fn of(workspace: &Workspace) -> Self {
-        let focused = workspace
-            .layout()
-            .pane_ids()
+        let pane_ids = workspace.layout().pane_ids();
+        let focused = pane_ids
             .iter()
             .position(|&id| id == workspace.focused_pane())
             .unwrap_or(0);
+        let destination = workspace
+            .destination()
+            .and_then(|destination| pane_ids.iter().position(|&id| id == destination));
         Self {
             version: VERSION,
             focused,
+            destination,
             layout: save_layout(workspace, workspace.layout()),
         }
     }
@@ -141,12 +146,15 @@ impl Session {
         let mut workspace = Workspace::new();
         let mut panes = Vec::new();
         let layout = restore_layout(&self.layout, &exists, &mut workspace, &mut panes)?;
-        let focused = layout
-            .pane_ids()
+        let pane_ids = layout.pane_ids();
+        let focused = pane_ids
             .get(self.focused)
             .copied()
-            .unwrap_or_else(|| layout.pane_ids()[0]);
-        workspace.replace(layout, panes, focused);
+            .unwrap_or_else(|| pane_ids[0]);
+        let destination = self
+            .destination
+            .and_then(|index| pane_ids.get(index).copied());
+        workspace.replace(layout, panes, focused, destination);
         workspace.close_empty_panes();
         Ok(workspace)
     }
@@ -344,6 +352,47 @@ mod tests {
                 .position(|&id| id == workspace.focused_pane())
         };
         assert_eq!(focused(&restored), focused(&workspace));
+    }
+
+    fn destination_index(workspace: &Workspace) -> Option<usize> {
+        let destination = workspace.destination()?;
+        workspace
+            .layout()
+            .pane_ids()
+            .iter()
+            .position(|&id| id == destination)
+    }
+
+    #[test]
+    fn destination_is_restored() {
+        let mut workspace = sample();
+        let left = workspace.layout().pane_ids()[0];
+        workspace.toggle_destination(left).unwrap();
+        let text = toml::to_string(&Session::of(&workspace)).unwrap();
+
+        let restored = Session::parse(&text).unwrap().restore(|_| true).unwrap();
+        assert_eq!(destination_index(&restored), Some(0));
+    }
+
+    #[test]
+    fn session_without_a_destination_has_none() {
+        let text = toml::to_string(&Session::of(&sample())).unwrap();
+        assert!(!text.contains("destination"));
+
+        let restored = Session::parse(&text).unwrap().restore(|_| true).unwrap();
+        assert_eq!(restored.destination(), None);
+    }
+
+    #[test]
+    fn destination_left_without_tabs_is_forgotten() {
+        let mut workspace = sample();
+        let left = workspace.layout().pane_ids()[0];
+        workspace.toggle_destination(left).unwrap();
+
+        let restored = Session::of(&workspace)
+            .restore(|content| *content == TabContent::Settings)
+            .unwrap();
+        assert_eq!(restored.destination(), None);
     }
 
     #[test]
