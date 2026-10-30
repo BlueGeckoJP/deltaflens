@@ -889,9 +889,9 @@ impl WorkspaceView {
     /// The menu item that toggles whether the pane is the destination.
     fn destination_label(&self, pane_id: PaneId) -> &'static str {
         if self.workspace.destination() == Some(pane_id) {
-            "Stop opening new tabs here"
+            "Turn off destination anchor"
         } else {
-            "Open new tabs here"
+            "Turn on destination anchor"
         }
     }
 
