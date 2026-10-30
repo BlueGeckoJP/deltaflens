@@ -11,7 +11,7 @@ use eyre::{Result, eyre};
 use gpui::{
     AnyElement, Bounds, ClickEvent, Context, CursorStyle, DragMoveEvent, ElementId, Entity,
     FocusHandle, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions,
-    Pixels, Point, Rgba, SharedString, Subscription, Window, actions, div, prelude::*, px,
+    Pixels, Point, Rgba, SharedString, Subscription, Window, actions, canvas, div, prelude::*, px,
     relative,
 };
 
@@ -58,6 +58,7 @@ actions!(
         LayoutExplorerAndViewer,
         ReopenClosedTab,
         OpenSettings,
+        ToggleDestination,
     ]
 );
 
@@ -68,6 +69,28 @@ const TAB_BAR_HEIGHT: Pixels = px(36.);
 /// The width of the empty part of a tab bar kept for moving the window, even
 /// when the tabs fill the bar.
 const MIN_DRAG_WIDTH: Pixels = px(48.);
+
+/// The width of the anchor at the left end of a tab bar.
+const DESTINATION_MARK_WIDTH: Pixels = px(28.);
+/// An anchor on a 12 × 12 grid, at the centers of the pixels so that the
+/// straight lines stay sharp.
+const ANCHOR_LINES: &[[(f32, f32); 2]] = &[
+    // The ring.
+    [(5.5, 0.5), (7.5, 0.5)],
+    [(7.5, 0.5), (7.5, 2.5)],
+    [(7.5, 2.5), (5.5, 2.5)],
+    [(5.5, 2.5), (5.5, 0.5)],
+    // The shank and the stock.
+    [(6.5, 2.5), (6.5, 11.5)],
+    [(4.5, 4.5), (8.5, 4.5)],
+    // The arms.
+    [(1.5, 7.5), (1.5, 8.5)],
+    [(1.5, 8.5), (3.5, 10.5)],
+    [(3.5, 10.5), (6.5, 11.5)],
+    [(6.5, 11.5), (9.5, 10.5)],
+    [(9.5, 10.5), (11.5, 8.5)],
+    [(11.5, 8.5), (11.5, 7.5)],
+];
 
 /// The width of the area around a line between panes that can be dragged.
 const DIVIDER_HANDLE_WIDTH: Pixels = px(6.);
@@ -107,6 +130,16 @@ impl Render for DragPreview {
                 .child(label)
         })
     }
+}
+
+/// The state of a pane that its tab bar shows.
+#[derive(Clone, Copy)]
+struct TabBarState {
+    active: Option<TabId>,
+    /// The active tab, if it is marked as the one that keys act on.
+    marked: Option<TabId>,
+    /// New tabs open in this pane.
+    destination: bool,
 }
 
 /// How a tab looks.
@@ -272,8 +305,7 @@ impl WorkspaceView {
         self.saved_session = Some(session);
     }
 
-    /// Opens `path` in a new tab of the focused pane: an explorer for a folder,
-    /// a viewer otherwise.
+    /// Opens `path` in a new tab: an explorer for a folder, a viewer otherwise.
     pub fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         // The explorer moves up and shows the path bar from an absolute path.
         let path = std::path::absolute(&path).unwrap_or(path);
@@ -285,9 +317,10 @@ impl WorkspaceView {
         self.open_tab(content, window, cx);
     }
 
-    /// Opens a new tab in the focused pane, to the right of its active tab.
+    /// Opens a new tab to the right of the active tab, in the destination if
+    /// there is one and in the focused pane otherwise. The focus stays.
     fn open_tab(&mut self, content: TabContent, window: &mut Window, cx: &mut Context<Self>) {
-        let pane_id = self.workspace.focused_pane();
+        let pane_id = self.workspace.opening_pane();
         if let Err(error) = self.workspace.open_tab(pane_id, content) {
             tracing::error!("{error:#}");
         }
@@ -381,7 +414,8 @@ impl WorkspaceView {
                 cx.notify();
             }
             ExplorerEvent::OpenImage(path) => {
-                // Open next to the explorer, in its pane.
+                // Open next to the explorer, in its pane, unless there is a
+                // destination.
                 if let Some(pane_id) = self.workspace.pane_of_tab(tab_id) {
                     let _ = self.workspace.focus_pane(pane_id);
                 }
@@ -528,8 +562,7 @@ impl WorkspaceView {
         }
     }
 
-    /// Shows the settings tab, opening it in the focused pane if there is
-    /// none.
+    /// Shows the settings tab, opening it if there is none.
     fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
         match self.workspace.find_tab(&TabContent::Settings) {
             Some(tab_id) => {
@@ -837,6 +870,31 @@ impl WorkspaceView {
         self.apply_preset(Preset::ExplorerAndViewer, window, cx);
     }
 
+    fn toggle_destination(
+        &mut self,
+        _: &ToggleDestination,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_destination_of(self.workspace.focused_pane(), cx);
+    }
+
+    fn toggle_destination_of(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
+        if let Err(error) = self.workspace.toggle_destination(pane_id) {
+            tracing::error!("{error:#}");
+        }
+        cx.notify();
+    }
+
+    /// The menu item that toggles whether the pane is the destination.
+    fn destination_label(&self, pane_id: PaneId) -> &'static str {
+        if self.workspace.destination() == Some(pane_id) {
+            "Stop opening new tabs here"
+        } else {
+            "Open new tabs here"
+        }
+    }
+
     fn focus_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
         if self.workspace.focused_pane() != pane_id {
             if let Err(error) = self.workspace.focus_pane(pane_id) {
@@ -918,6 +976,12 @@ impl WorkspaceView {
                 self.workspace.can_reopen_closed_tab(tab_exists),
                 window,
             )
+            .action(
+                self.destination_label(pane_id),
+                ToggleDestination,
+                true,
+                window,
+            )
             .separator()
             .item("Close tab", close);
         self.context_menu
@@ -936,6 +1000,12 @@ impl WorkspaceView {
                 "Reopen closed tab",
                 ReopenClosedTab,
                 self.workspace.can_reopen_closed_tab(tab_exists),
+                window,
+            )
+            .action(
+                self.destination_label(self.workspace.focused_pane()),
+                ToggleDestination,
+                true,
                 window,
             )
             .separator()
@@ -1189,6 +1259,8 @@ impl WorkspaceView {
         // Only worth marking when there is another pane to tell it from.
         let marked = self.workspace.focused_pane() == pane_id
             && !matches!(self.workspace.layout(), Layout::Pane(_));
+        let destination = self.workspace.destination() == Some(pane_id);
+        let show_tab_bar = !pane.tabs().is_empty() || title_bar.is_some() || destination;
         let content = match active.and_then(|tab_id| self.views.get(&tab_id)) {
             Some(view) => view.to_element(),
             None => div()
@@ -1218,13 +1290,16 @@ impl WorkspaceView {
                 }),
             )
             // A pane at the top keeps its tab bar without tabs, to move the
-            // window with.
-            .when(!pane.tabs().is_empty() || title_bar.is_some(), |this| {
+            // window with, and the destination to show its mark.
+            .when(show_tab_bar, |this| {
                 this.child(Self::render_tab_bar(
                     pane_id,
                     pane.tabs(),
-                    active.filter(|_| marked),
-                    active,
+                    TabBarState {
+                        active,
+                        marked: active.filter(|_| marked),
+                        destination,
+                    },
                     title_bar,
                     window,
                     cx,
@@ -1278,8 +1353,7 @@ impl WorkspaceView {
     fn render_tab_bar(
         pane_id: PaneId,
         tabs: &[Tab],
-        marked: Option<TabId>,
-        active: Option<TabId>,
+        state: TabBarState,
         title_bar: Option<TitleBarPart>,
         window: &Window,
         cx: &mut Context<Self>,
@@ -1295,9 +1369,9 @@ impl WorkspaceView {
             .overflow_x_scroll()
             .children(tabs.iter().enumerate().map(|(index, tab)| {
                 let look = TabLook {
-                    active: active == Some(tab.id()),
-                    marked: marked == Some(tab.id()),
-                    round_top_left: index == 0 && round_top_left,
+                    active: state.active == Some(tab.id()),
+                    marked: state.marked == Some(tab.id()),
+                    round_top_left: index == 0 && round_top_left && !state.destination,
                 };
                 Self::render_tab(pane_id, index, tab, look, cx)
             }));
@@ -1310,6 +1384,9 @@ impl WorkspaceView {
             .text_sm()
             .when(round_top_left, |this| this.rounded_tl(ROUNDING))
             .when(round_top_right, |this| this.rounded_tr(ROUNDING))
+            .when(state.destination, |this| {
+                this.child(Self::render_destination_mark(pane_id, round_top_left, cx))
+            })
             .child(tabs)
             .child(Self::render_rest_of_tab_bar(
                 pane_id,
@@ -1321,6 +1398,40 @@ impl WorkspaceView {
             .when(title_bar.is_some_and(|part| part.controls), |this| {
                 this.child(window_frame::window_controls(window, round_top_right, cx))
             })
+    }
+
+    /// The anchor at the left end of the tab bar of the destination, which
+    /// stops the pane being the destination when clicked.
+    fn render_destination_mark(
+        pane_id: PaneId,
+        round_top_left: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = theme(cx);
+        div()
+            .id(ElementId::Name(format!("destination-{pane_id:?}").into()))
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .justify_center()
+            .w(DESTINATION_MARK_WIDTH)
+            .h_full()
+            .border_r_1()
+            .border_color(theme.border)
+            .when(round_top_left, |this| this.rounded_tl(ROUNDING))
+            .hover(move |style| style.bg(theme.element_hover))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.toggle_destination_of(pane_id, cx);
+            }))
+            .child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, (), window, _| {
+                        window_frame::paint_lines(ANCHOR_LINES, theme.accent, bounds, window);
+                    },
+                )
+                .size(px(12.)),
+            )
     }
 
     fn render_tab(
@@ -1541,6 +1652,7 @@ impl Render for WorkspaceView {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::open))
             .on_action(cx.listener(Self::new_tab))
+            .on_action(cx.listener(Self::toggle_destination))
             .on_action(cx.listener(Self::close_active_tab))
             .on_action(cx.listener(Self::activate_next_tab))
             .on_action(cx.listener(Self::activate_previous_tab))

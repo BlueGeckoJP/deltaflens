@@ -21,6 +21,8 @@ pub struct Workspace {
     layout: Layout,
     panes: HashMap<PaneId, Pane>,
     focused_pane: PaneId,
+    /// The pane that new tabs open in, whichever pane is focused.
+    destination: Option<PaneId>,
     /// Shared by pane and tab IDs.
     next_id: u64,
     /// The most recently closed tab last.
@@ -36,6 +38,7 @@ impl Workspace {
             layout: Layout::Pane(pane_id),
             panes: HashMap::from([(pane_id, Pane::default())]),
             focused_pane: pane_id,
+            destination: None,
             next_id: 1,
             closed_tabs: VecDeque::new(),
         }
@@ -49,6 +52,31 @@ impl Workspace {
     #[must_use]
     pub fn focused_pane(&self) -> PaneId {
         self.focused_pane
+    }
+
+    /// The pane that was chosen for new tabs to open in, if any.
+    #[must_use]
+    pub fn destination(&self) -> Option<PaneId> {
+        self.destination
+    }
+
+    /// The pane where a new tab opens: the destination, or else the focused
+    /// pane.
+    #[must_use]
+    pub fn opening_pane(&self) -> PaneId {
+        self.destination.unwrap_or(self.focused_pane)
+    }
+
+    /// Makes the pane the destination of new tabs, or stops it being one if
+    /// it already is. There is at most one destination.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there is no pane with `id`.
+    pub fn toggle_destination(&mut self, id: PaneId) -> Result<()> {
+        self.pane(id)?;
+        self.destination = (self.destination != Some(id)).then_some(id);
+        Ok(())
     }
 
     /// # Errors
@@ -105,6 +133,9 @@ impl Workspace {
         self.panes.remove(&id);
         if self.focused_pane == id {
             self.focused_pane = neighbor;
+        }
+        if self.destination == Some(id) {
+            self.destination = None;
         }
         Ok(())
     }
@@ -219,6 +250,9 @@ impl Workspace {
                 }
                 if self.focused_pane == id {
                     self.focused_pane = last;
+                }
+                if self.destination == Some(id) {
+                    self.destination = None;
                 }
             }
         }
@@ -444,8 +478,9 @@ impl Workspace {
         Ok(tab_id)
     }
 
-    /// Opens a tab that shows what the tab shows, right of it in its pane, and
-    /// activates the new tab and focuses the pane.
+    /// Opens a tab that shows what the tab shows and activates it. It goes
+    /// right of the tab, or next to the active tab of the destination if
+    /// another pane is the destination. The pane of the tab is focused.
     ///
     /// # Errors
     ///
@@ -463,8 +498,14 @@ impl Workspace {
             .map(|(index, tab)| (index, tab.content().clone()))
             .ok_or_else(|| eyre!("tab {tab_id:?} is not open"))?;
         let new_id = TabId(self.allocate_id());
-        self.pane_mut(pane_id)?
-            .insert_tab(index + 1, Tab::new(new_id, content));
+        let tab = Tab::new(new_id, content);
+        match self
+            .destination
+            .filter(|&destination| destination != pane_id)
+        {
+            Some(destination) => self.pane_mut(destination)?.add_tab(tab),
+            None => self.pane_mut(pane_id)?.insert_tab(index + 1, tab),
+        }
         self.focused_pane = pane_id;
         Ok(new_id)
     }
@@ -507,10 +548,17 @@ impl Workspace {
 
     /// Replaces the layout, the panes and the focused pane, for restoring a
     /// session. `panes` must hold the panes of `layout`.
-    pub(crate) fn replace(&mut self, layout: Layout, panes: Vec<(PaneId, Pane)>, focused: PaneId) {
+    pub(crate) fn replace(
+        &mut self,
+        layout: Layout,
+        panes: Vec<(PaneId, Pane)>,
+        focused: PaneId,
+        destination: Option<PaneId>,
+    ) {
         self.layout = layout;
         self.panes = panes.into_iter().collect();
         self.focused_pane = focused;
+        self.destination = destination;
         self.closed_tabs.clear();
     }
 
@@ -531,6 +579,9 @@ impl Workspace {
                 self.panes.remove(&id);
                 if self.focused_pane == id {
                     self.focused_pane = neighbor;
+                }
+                if self.destination == Some(id) {
+                    self.destination = None;
                 }
             }
         }
@@ -1093,6 +1144,92 @@ mod tests {
         assert_ne!(clone, a);
         assert_ne!(clone, c);
         assert_eq!(workspace.focused_pane(), first);
+    }
+
+    #[test]
+    fn clone_goes_to_the_destination_and_keeps_the_focus() {
+        let (mut workspace, first, second, _) = two_panes();
+        let a = workspace.pane(first).unwrap().tabs()[0].id();
+        workspace.toggle_destination(second).unwrap();
+
+        let clone = workspace.clone_tab(a).unwrap();
+        assert_eq!(contents(&workspace, first), [viewer("a.jxl")]);
+        let pane = workspace.pane(second).unwrap();
+        assert_eq!(pane.active_tab().map(Tab::id), Some(clone));
+        assert_eq!(workspace.focused_pane(), first);
+    }
+
+    #[test]
+    fn clone_in_the_destination_goes_right_of_the_tab() {
+        let (mut workspace, first, _, _) = two_panes();
+        workspace.open_tab(first, viewer("c.jxl")).unwrap();
+        let a = workspace.pane(first).unwrap().tabs()[0].id();
+        workspace.toggle_destination(first).unwrap();
+
+        workspace.clone_tab(a).unwrap();
+        assert_eq!(
+            contents(&workspace, first),
+            [viewer("a.jxl"), viewer("a.jxl"), viewer("c.jxl")]
+        );
+    }
+
+    #[test]
+    fn new_tabs_open_in_the_destination_without_moving_the_focus() {
+        let (mut workspace, first, second, _) = two_panes();
+        workspace.focus_pane(first).unwrap();
+        assert_eq!(workspace.opening_pane(), first);
+
+        workspace.toggle_destination(second).unwrap();
+        assert_eq!(workspace.opening_pane(), second);
+        assert_eq!(workspace.focused_pane(), first);
+    }
+
+    #[test]
+    fn a_window_has_one_destination() {
+        let (mut workspace, first, second, _) = two_panes();
+        workspace.toggle_destination(first).unwrap();
+        workspace.toggle_destination(second).unwrap();
+        assert_eq!(workspace.destination(), Some(second));
+
+        workspace.toggle_destination(second).unwrap();
+        assert_eq!(workspace.destination(), None);
+        assert!(workspace.toggle_destination(PaneId(99)).is_err());
+    }
+
+    #[test]
+    fn closing_the_destination_forgets_it() {
+        let (mut workspace, first, second, _) = two_panes();
+        workspace.toggle_destination(second).unwrap();
+        workspace.close_pane(second).unwrap();
+        assert_eq!(workspace.destination(), None);
+        assert_eq!(workspace.opening_pane(), first);
+    }
+
+    #[test]
+    fn a_preset_that_removes_the_destination_forgets_it() {
+        let (mut workspace, _, second, _) = two_panes();
+        workspace.toggle_destination(second).unwrap();
+        workspace.apply_preset(Preset::Single);
+        assert_eq!(workspace.destination(), None);
+    }
+
+    #[test]
+    fn a_preset_that_keeps_the_destination_keeps_it() {
+        let (mut workspace, first, _, _) = two_panes();
+        workspace.toggle_destination(first).unwrap();
+        workspace.apply_preset(Preset::Single);
+        assert_eq!(workspace.destination(), Some(first));
+    }
+
+    #[test]
+    fn opening_a_tab_in_a_given_pane_ignores_the_destination() {
+        let (mut workspace, first, second, _) = two_panes();
+        workspace.toggle_destination(second).unwrap();
+        workspace.open_tab(first, viewer("c.jxl")).unwrap();
+        assert_eq!(
+            contents(&workspace, first),
+            [viewer("a.jxl"), viewer("c.jxl")]
+        );
     }
 
     #[test]

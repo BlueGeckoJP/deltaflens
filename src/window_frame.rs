@@ -225,6 +225,16 @@ fn paint_icon(icon: Icon, color: Rgba, bounds: Bounds<Pixels>, window: &mut Wind
         ],
         Icon::Close => &[[(2.5, 2.5), (9.5, 9.5)], [(9.5, 2.5), (2.5, 9.5)]],
     };
+    paint_lines(lines, color, bounds, window);
+}
+
+/// Draws lines of 1 px in `color`, with their points relative to `bounds`.
+pub fn paint_lines(
+    lines: &[[(f32, f32); 2]],
+    color: Rgba,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+) {
     let origin = bounds.origin;
     let mut builder = PathBuilder::stroke(px(1.));
     for [(x0, y0), (x1, y1)] in lines {
@@ -233,7 +243,7 @@ fn paint_icon(icon: Icon, color: Rgba, bounds: Bounds<Pixels>, window: &mut Wind
     }
     match builder.build() {
         Ok(path) => window.paint_path(path, color),
-        Err(error) => tracing::error!("failed to draw a window button: {error}"),
+        Err(error) => tracing::error!("failed to draw an icon: {error}"),
     }
 }
 
