@@ -18,7 +18,7 @@ use crate::{
     settings::SettingsStore,
     theme::{Theme, theme},
     thumbnails::{ThumbnailKey, Thumbnails},
-    workspace_view::{GoBack, GoForward, GoUp, NewTab},
+    workspace_view::{GoBack, GoForward, GoUp, NewTab, anchor_icon},
 };
 
 /// How much wider and taller a grid cell, including its padding and the name
@@ -57,6 +57,8 @@ pub enum ExplorerEvent {
     Navigated(PathBuf),
     /// An image was double-clicked.
     OpenImage(PathBuf),
+    /// The mark of the destination of new tabs was clicked.
+    DestinationMarkClicked,
 }
 
 /// Shows the folders and images of a folder as a grid, like a file manager.
@@ -77,6 +79,9 @@ pub struct Explorer {
     context_menu: Entity<ContextMenu>,
     /// The error of the last action from the context menu.
     notice: Option<SharedString>,
+    /// Whether the toolbar shows the mark of the destination of new tabs,
+    /// for a pane without a tab bar to show it.
+    destination_mark: bool,
 }
 
 impl EventEmitter<ExplorerEvent> for Explorer {}
@@ -113,6 +118,7 @@ impl Explorer {
             show_hidden,
             context_menu,
             notice: None,
+            destination_mark: false,
         };
         this.load(cx);
         this
@@ -290,8 +296,15 @@ impl Explorer {
             .update(cx, |context_menu, cx| context_menu.show(menu, cx));
     }
 
+    /// Shows or hides the mark of the destination in the toolbar. Set before
+    /// the explorer is drawn, so it needs no redraw of its own.
+    pub fn set_destination_mark(&mut self, shown: bool) {
+        self.destination_mark = shown;
+    }
+
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme(cx);
+        let hover = theme.element;
         div()
             .flex()
             .flex_shrink_0()
@@ -302,6 +315,32 @@ impl Explorer {
             .bg(theme.toolbar)
             .border_b_1()
             .border_color(theme.border)
+            // Clicking the mark stops the pane being the destination.
+            .when(self.destination_mark, |this| {
+                this.child(
+                    div()
+                        .id("destination")
+                        .flex()
+                        .flex_shrink_0()
+                        .items_center()
+                        .justify_center()
+                        .size(px(26.))
+                        .rounded_sm()
+                        .hover(move |style| style.bg(hover))
+                        .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
+                            cx.emit(ExplorerEvent::DestinationMarkClicked);
+                        }))
+                        .child(anchor_icon(theme.accent)),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .w(px(1.))
+                        .h(px(16.))
+                        .mx_1()
+                        .bg(theme.border),
+                )
+            })
             .child(nav_button(
                 "back",
                 "←",

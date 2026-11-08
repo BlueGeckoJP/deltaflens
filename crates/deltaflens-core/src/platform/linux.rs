@@ -26,6 +26,21 @@ pub fn is_hidden(path: &Path) -> bool {
         .is_some_and(|name| name.starts_with('.'))
 }
 
+/// How `path` is shown to the user, with the home directory written as `~`.
+#[must_use]
+pub fn display_path(path: &Path) -> String {
+    tilde_path(path, std::env::home_dir().as_deref())
+}
+
+/// `path` with `home` written as `~`.
+fn tilde_path(path: &Path, home: Option<&Path>) -> String {
+    match home.and_then(|home| path.strip_prefix(home).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
 /// The directory for files that can be made again, such as thumbnails:
 /// `$XDG_CACHE_HOME`, or `~/.cache`.
 #[must_use]
@@ -117,6 +132,22 @@ mod tests {
             .chain(command.get_args())
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[test]
+    fn home_is_shown_as_a_tilde() {
+        let home = Some(Path::new("/home/user"));
+        assert_eq!(
+            tilde_path(Path::new("/home/user/Pictures"), home),
+            "~/Pictures"
+        );
+        assert_eq!(tilde_path(Path::new("/home/user"), home), "~");
+        assert_eq!(
+            tilde_path(Path::new("/home/username"), home),
+            "/home/username"
+        );
+        assert_eq!(tilde_path(Path::new("/srv/photos"), home), "/srv/photos");
+        assert_eq!(tilde_path(Path::new("/srv/photos"), None), "/srv/photos");
     }
 
     #[test]

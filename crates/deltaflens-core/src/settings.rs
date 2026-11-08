@@ -23,6 +23,7 @@ const IMAGE_CACHE_MIB: &str = "image_cache_mib";
 const OPEN_COMMAND: &str = "open_command";
 const THEME: &str = "theme";
 const VERTICAL_TABS: &str = "vertical_tabs";
+const HORIZONTAL_TABS: &str = "horizontal_tabs";
 
 /// Which colors the application uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -97,6 +98,8 @@ pub struct Settings {
     pub open_command: String,
     pub theme: ThemeChoice,
     pub vertical_tabs: VerticalTabs,
+    /// Whether each pane has a tab bar at its top.
+    pub horizontal_tabs: bool,
 }
 
 impl Default for Settings {
@@ -108,6 +111,7 @@ impl Default for Settings {
             open_command: platform::DEFAULT_OPEN_COMMAND.to_owned(),
             theme: ThemeChoice::default(),
             vertical_tabs: VerticalTabs::default(),
+            horizontal_tabs: true,
         }
     }
 }
@@ -177,6 +181,10 @@ impl Settings {
                         .and_then(VerticalTabs::from_name)
                         .map(|mode| settings.vertical_tabs = mode)
                         .ok_or_else(|| "\"off\", \"rail\" or \"full\"".to_owned()),
+                    HORIZONTAL_TABS => value
+                        .and_then(Value::as_bool)
+                        .map(|shown| settings.horizontal_tabs = shown)
+                        .ok_or_else(|| "true or false".to_owned()),
                     _ => {
                         errors.push(format!("Unknown setting \"{key}\"."));
                         continue;
@@ -228,6 +236,9 @@ impl Settings {
         }
         if current.vertical_tabs != self.vertical_tabs {
             set(&mut document, VERTICAL_TABS, self.vertical_tabs.name());
+        }
+        if current.horizontal_tabs != self.horizontal_tabs {
+            set(&mut document, HORIZONTAL_TABS, self.horizontal_tabs);
         }
         Ok(document.to_string())
     }
@@ -298,7 +309,8 @@ mod tests {
              image_cache_mib = 2048\n\
              open_command = \"gimp <path>\"\n\
              theme = \"light\"\n\
-             vertical_tabs = \"rail\"\n",
+             vertical_tabs = \"rail\"\n\
+             horizontal_tabs = false\n",
         );
         assert_eq!(
             settings,
@@ -309,6 +321,7 @@ mod tests {
                 open_command: "gimp <path>".to_owned(),
                 theme: ThemeChoice::Light,
                 vertical_tabs: VerticalTabs::Rail,
+                horizontal_tabs: false,
             }
         );
         assert_eq!(errors, Vec::<String>::new());
@@ -328,7 +341,8 @@ mod tests {
             "thumbnail_size = 9999\n\
              show_hidden_files = \"yes\"\n\
              image_cache_mib = 512\n\
-             open_command = \"  \"\n",
+             open_command = \"  \"\n\
+             horizontal_tabs = \"no\"\n",
         );
         assert_eq!(
             settings,
@@ -337,7 +351,7 @@ mod tests {
                 ..Settings::default()
             }
         );
-        assert_eq!(errors.len(), 3, "{errors:?}");
+        assert_eq!(errors.len(), 4, "{errors:?}");
         assert!(errors[0].contains("\"thumbnail_size\" must be a whole number from 64 to 512"));
     }
 
@@ -379,6 +393,18 @@ mod tests {
         assert_eq!(
             settings.merge_into("").unwrap(),
             "vertical_tabs = \"full\"\n"
+        );
+    }
+
+    #[test]
+    fn hiding_horizontal_tabs_is_written() {
+        let settings = Settings {
+            horizontal_tabs: false,
+            ..Settings::default()
+        };
+        assert_eq!(
+            settings.merge_into("").unwrap(),
+            "horizontal_tabs = false\n"
         );
     }
 

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::TabId;
 
@@ -13,6 +13,18 @@ pub enum TabContent {
     },
     /// Shows the settings and changes them.
     Settings,
+}
+
+impl TabContent {
+    /// The folder that holds the image or folder shown, if any.
+    #[must_use]
+    pub fn folder(&self) -> Option<&Path> {
+        match self {
+            Self::Viewer { path } => path.parent(),
+            Self::Explorer { dir } => dir.parent(),
+            Self::Settings => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,5 +50,23 @@ impl Tab {
 
     pub(crate) fn set_content(&mut self, content: TabContent) {
         self.content = content;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn folder_holds_what_the_tab_shows() {
+        let viewer = TabContent::Viewer {
+            path: PathBuf::from("/photos/kyoto/torii.jxl"),
+        };
+        let explorer = TabContent::Explorer {
+            dir: PathBuf::from("/photos/kyoto"),
+        };
+        assert_eq!(viewer.folder(), Some(Path::new("/photos/kyoto")));
+        assert_eq!(explorer.folder(), Some(Path::new("/photos")));
+        assert_eq!(TabContent::Settings.folder(), None);
     }
 }
