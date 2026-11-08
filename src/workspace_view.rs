@@ -1,18 +1,20 @@
+mod vertical_tabs;
+
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
 use deltaflens_core::{
     Axis, Direction, DropZone, Layout, PaneId, Preset, Session, Side, Tab, TabContent, TabId,
-    Workspace, drop_zone,
+    VerticalTabs, Workspace, drop_zone,
 };
 use eyre::{Result, eyre};
 use gpui::{
-    AnyElement, Bounds, ClickEvent, Context, CursorStyle, DragMoveEvent, ElementId, Entity,
-    FocusHandle, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions,
-    Pixels, Point, Rgba, SharedString, Subscription, Window, actions, canvas, div, prelude::*, px,
-    relative,
+    AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, Div, DragMoveEvent, ElementId,
+    Entity, FocusHandle, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    PathPromptOptions, Pixels, Point, Rgba, SharedString, Stateful, Subscription, Window, actions,
+    canvas, div, prelude::*, px, relative,
 };
 
 use crate::{
@@ -59,6 +61,7 @@ actions!(
         ReopenClosedTab,
         OpenSettings,
         ToggleDestination,
+        ToggleVerticalTabs,
     ]
 );
 
@@ -205,6 +208,11 @@ pub struct WorkspaceView {
     /// changes. `None` until the session is restored, so that the saved one
     /// is not replaced before.
     saved_session: Option<Session>,
+    /// How the vertical tabs come back when shown again: as they were last
+    /// shown.
+    shown_vertical_tabs: VerticalTabs,
+    /// The panes whose tabs the vertical tabs hide.
+    collapsed_panes: HashSet<PaneId>,
 }
 
 impl WorkspaceView {
@@ -214,8 +222,9 @@ impl WorkspaceView {
         let settings = cx.new(SettingsStore::new);
         // Show errors in the settings as they come and go, and follow the
         // theme.
-        cx.observe_in(&settings, window, |this, _, window, cx| {
+        cx.observe_in(&settings, window, |this, settings, window, cx| {
             this.update_theme(window, cx);
+            this.remember_vertical_tabs(settings.read(cx).settings().vertical_tabs);
             cx.notify();
         })
         .detach();
@@ -231,10 +240,18 @@ impl WorkspaceView {
         cx.set_global(theme);
         let context_menu = cx.new(|_| ContextMenu::default());
         let close_menu_on_key = close_menu_on_key(&context_menu, window, cx);
-        Self {
+        let thumbnails = cx.new(Thumbnails::new);
+        // The vertical tabs show thumbnails as they are made.
+        cx.observe(&thumbnails, |this, _, cx| {
+            if this.vertical_tabs(cx) != VerticalTabs::Off {
+                cx.notify();
+            }
+        })
+        .detach();
+        let mut this = Self {
             workspace: Workspace::new(),
             views: HashMap::new(),
-            thumbnails: cx.new(Thumbnails::new),
+            thumbnails,
             images: cx.new(|cx| Images::new(&settings, cx)),
             settings,
             focus_handle,
@@ -244,7 +261,11 @@ impl WorkspaceView {
             _close_menu_on_key: close_menu_on_key,
             drop_target: None,
             saved_session: None,
-        }
+            shown_vertical_tabs: VerticalTabs::Rail,
+            collapsed_panes: HashSet::new(),
+        };
+        this.remember_vertical_tabs(this.vertical_tabs(cx));
+        this
     }
 
     /// Restores the layout and the tabs of the last session, leaving out
@@ -895,6 +916,39 @@ impl WorkspaceView {
         }
     }
 
+    /// How the vertical tabs are shown now.
+    fn vertical_tabs(&self, cx: &App) -> VerticalTabs {
+        self.settings.read(cx).settings().vertical_tabs
+    }
+
+    /// Keeps `mode` to show the vertical tabs in again, unless it hides them.
+    fn remember_vertical_tabs(&mut self, mode: VerticalTabs) {
+        if mode != VerticalTabs::Off {
+            self.shown_vertical_tabs = mode;
+        }
+    }
+
+    /// Shows the vertical tabs in `mode`, and saves it in the settings.
+    fn set_vertical_tabs(&mut self, mode: VerticalTabs, cx: &mut Context<Self>) {
+        self.settings.update(cx, |settings, cx| {
+            settings.update(|s| s.vertical_tabs = mode, cx);
+        });
+    }
+
+    /// Hides the vertical tabs, or shows them as they were last shown.
+    fn toggle_vertical_tabs(
+        &mut self,
+        _: &ToggleVerticalTabs,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mode = match self.vertical_tabs(cx) {
+            VerticalTabs::Off => self.shown_vertical_tabs,
+            VerticalTabs::Rail | VerticalTabs::Full => VerticalTabs::Off,
+        };
+        self.set_vertical_tabs(mode, cx);
+    }
+
     fn focus_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
         if self.workspace.focused_pane() != pane_id {
             if let Err(error) = self.workspace.focus_pane(pane_id) {
@@ -993,6 +1047,14 @@ impl WorkspaceView {
     fn show_app_menu(&mut self, position: Point<Pixels>, window: &Window, cx: &mut Context<Self>) {
         let window_menu =
             window_frame::client_tiling(window).is_some() && window.window_controls().window_menu;
+        let vertical_tabs = self.vertical_tabs(cx);
+        let this = cx.entity().downgrade();
+        let show_vertical_tabs = |mode: VerticalTabs| {
+            let this = this.clone();
+            move |_: &mut Window, cx: &mut App| {
+                let _ = this.update(cx, |this, cx| this.set_vertical_tabs(mode, cx));
+            }
+        };
         let menu = Menu::new(position)
             .action("Open image…", Open, true, window)
             .action("New tab", NewTab, true, window)
@@ -1014,6 +1076,19 @@ impl WorkspaceView {
             .action("Three columns", LayoutThreeColumns, true, window)
             .action("Grid", LayoutGrid, true, window)
             .action("Explorer and viewer", LayoutExplorerAndViewer, true, window)
+            .separator()
+            .item("No vertical tabs", show_vertical_tabs(VerticalTabs::Off))
+            .checked(vertical_tabs == VerticalTabs::Off)
+            .item(
+                "Vertical tabs as a rail",
+                show_vertical_tabs(VerticalTabs::Rail),
+            )
+            .checked(vertical_tabs == VerticalTabs::Rail)
+            .item(
+                "Vertical tabs in full",
+                show_vertical_tabs(VerticalTabs::Full),
+            )
+            .checked(vertical_tabs == VerticalTabs::Full)
             .separator()
             .action("Settings", OpenSettings, true, window)
             // The menu of the system, which the window frame drawn by the
@@ -1078,8 +1153,13 @@ impl WorkspaceView {
     }
 
     /// The part each pane at the top of the window takes in the title bar, or
-    /// nothing when the compositor draws the frame.
-    fn title_bar_parts(&self, window: &Window) -> HashMap<PaneId, TitleBarPart> {
+    /// nothing when the compositor draws the frame. The vertical tabs take
+    /// the top left corner when `vertical_tabs` are shown.
+    fn title_bar_parts(
+        &self,
+        vertical_tabs: bool,
+        window: &Window,
+    ) -> HashMap<PaneId, TitleBarPart> {
         let Some(tiling) = window_frame::client_tiling(window) else {
             return HashMap::new();
         };
@@ -1091,7 +1171,10 @@ impl WorkspaceView {
             .map(|pane_id| {
                 let part = TitleBarPart {
                     controls: Some(pane_id) == top_right,
-                    round_top_left: Some(pane_id) == top_left && !tiling.top && !tiling.left,
+                    round_top_left: Some(pane_id) == top_left
+                        && !vertical_tabs
+                        && !tiling.top
+                        && !tiling.left,
                     round_top_right: Some(pane_id) == top_right && !tiling.top && !tiling.right,
                 };
                 (pane_id, part)
@@ -1444,7 +1527,7 @@ impl WorkspaceView {
         let tab_id = tab.id();
         let label = SharedString::from(tab_name(tab));
         let theme = theme(cx);
-        div()
+        let tab = div()
             .id(("tab", index))
             .when(look.round_top_left, |this| this.rounded_tl(ROUNDING))
             .flex()
@@ -1478,25 +1561,52 @@ impl WorkspaceView {
                         .h(px(2.))
                         .bg(theme.accent),
                 )
-            })
+            });
+        Self::tab_behavior(tab, pane_id, index, tab_id, label.clone(), cx)
+            .child(div().min_w_0().truncate().child(label))
+            .child(
+                div()
+                    .id("close")
+                    .flex_shrink_0()
+                    .px_1()
+                    .rounded_sm()
+                    .hover(move |style| style.bg(theme.element_hover))
+                    .child("×")
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.close_tab(pane_id, tab_id, cx);
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// Makes `element` act as the tab at `index` of `pane_id`, wherever it is
+    /// shown. Clicking it activates the tab, and dragging it moves the tab.
+    /// A tab or image dropped on it goes where the tab is, in any pane.
+    /// Right-clicking it opens the menu of the tab, and middle-clicking it
+    /// closes the tab.
+    fn tab_behavior(
+        element: Stateful<Div>,
+        pane_id: PaneId,
+        index: usize,
+        tab_id: TabId,
+        label: SharedString,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let drop_target = theme(cx).drop_target;
+        element
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 this.activate_tab(pane_id, tab_id, cx);
             }))
             // Dragging a tab moves it; dropping it (or an image) on a tab puts
             // it where that tab is, in any pane.
-            .on_drag(
-                DraggedTab {
-                    tab_id,
-                    label: label.clone(),
-                },
-                |dragged, _, _, cx| {
-                    cx.new(|_| DragPreview {
-                        label: Some(dragged.label.clone()),
-                    })
-                },
-            )
-            .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(theme.drop_target))
-            .drag_over::<DraggedImage>(move |style, _, _, _| style.bg(theme.drop_target))
+            .on_drag(DraggedTab { tab_id, label }, |dragged, _, _, cx| {
+                cx.new(|_| DragPreview {
+                    label: Some(dragged.label.clone()),
+                })
+            })
+            .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(drop_target))
+            .drag_over::<DraggedImage>(move |style, _, _, _| style.bg(drop_target))
             .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
                 this.move_tab(dragged, pane_id, index, cx);
             }))
@@ -1517,61 +1627,17 @@ impl WorkspaceView {
                     this.close_tab(pane_id, tab_id, cx);
                 }),
             )
-            .child(div().min_w_0().truncate().child(label))
-            .child(
-                div()
-                    .id("close")
-                    .flex_shrink_0()
-                    .px_1()
-                    .rounded_sm()
-                    .hover(move |style| style.bg(theme.element_hover))
-                    .child("×")
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.close_tab(pane_id, tab_id, cx);
-                    })),
-            )
-            .into_any_element()
     }
 
-    /// The part of a tab bar right of the tabs. A tab dropped on it moves to
-    /// the end, and right-clicking it opens the menu of the application. At
-    /// the top of the window, it works as a title bar when `moves_window` is
-    /// set.
-    fn render_rest_of_tab_bar(
-        pane_id: PaneId,
-        tab_count: usize,
-        moves_window: bool,
+    /// Makes `element` part of the title bar: dragging it moves the window,
+    /// and double-clicking it maximizes the window.
+    fn moves_window(
+        element: Stateful<Div>,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> Stateful<Div> {
         let controls = window.window_controls();
-        let theme = theme(cx);
-        let rest = div()
-            .id(ElementId::Name(format!("tab-bar-rest-{pane_id:?}").into()))
-            .flex_1()
-            .h_full()
-            .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(theme.drop_target))
-            .drag_over::<DraggedImage>(move |style, _, _, _| style.bg(theme.drop_target))
-            .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
-                this.move_tab(dragged, pane_id, tab_count, cx);
-            }))
-            .on_drop(
-                cx.listener(move |this, dragged: &DraggedImage, window, cx| {
-                    this.open_image_at(dragged, pane_id, tab_count, window, cx);
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    this.show_app_menu(event.position, window, cx);
-                }),
-            );
-        if !moves_window {
-            return rest.into_any_element();
-        }
-        rest.flex_shrink_0()
-            .min_w(MIN_DRAG_WIDTH)
+        element
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, _, _| this.move_pending = true),
@@ -1596,6 +1662,44 @@ impl WorkspaceView {
                     }
                 })
             })
+    }
+
+    /// The part of a tab bar right of the tabs. A tab dropped on it moves to
+    /// the end, and right-clicking it opens the menu of the application. At
+    /// the top of the window, it works as a title bar when `moves_window` is
+    /// set.
+    fn render_rest_of_tab_bar(
+        pane_id: PaneId,
+        tab_count: usize,
+        moves_window: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = theme(cx);
+        let rest = div()
+            .id(ElementId::Name(format!("tab-bar-rest-{pane_id:?}").into()))
+            .flex_1()
+            .h_full()
+            .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(theme.drop_target))
+            .drag_over::<DraggedImage>(move |style, _, _, _| style.bg(theme.drop_target))
+            .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
+                this.move_tab(dragged, pane_id, tab_count, cx);
+            }))
+            .on_drop(
+                cx.listener(move |this, dragged: &DraggedImage, window, cx| {
+                    this.open_image_at(dragged, pane_id, tab_count, window, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.show_app_menu(event.position, window, cx);
+                }),
+            );
+        if !moves_window {
+            return rest.into_any_element();
+        }
+        Self::moves_window(rest.flex_shrink_0().min_w(MIN_DRAG_WIDTH), window, cx)
             .into_any_element()
     }
 }
@@ -1646,7 +1750,10 @@ impl Render for WorkspaceView {
         if !cx.has_active_drag() {
             self.drop_target = None;
         }
-        let title_bar = self.title_bar_parts(window);
+        let vertical_tabs = self.vertical_tabs(cx);
+        let title_bar = self.title_bar_parts(vertical_tabs != VerticalTabs::Off, window);
+        let vertical_tabs = (vertical_tabs != VerticalTabs::Off)
+            .then(|| self.render_vertical_tabs(vertical_tabs, window, cx));
         let content = div()
             .size_full()
             .track_focus(&self.focus_handle)
@@ -1679,15 +1786,23 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::layout_explorer_and_viewer))
             .on_action(cx.listener(Self::reopen_closed_tab))
             .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(Self::toggle_vertical_tabs))
             .flex()
             .flex_col()
-            .child(div().flex_1().min_h_0().child(self.render_layout(
-                self.workspace.layout(),
-                &[],
-                &title_bar,
-                window,
-                cx,
-            )))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .children(vertical_tabs)
+                    .child(div().flex_1().min_w_0().h_full().child(self.render_layout(
+                        self.workspace.layout(),
+                        &[],
+                        &title_bar,
+                        window,
+                        cx,
+                    ))),
+            )
             .children(self.render_settings_errors(cx))
             .child(self.context_menu.clone());
         window_frame::window_frame(content, window, cx)

@@ -1,4 +1,4 @@
-use deltaflens_core::{IMAGE_CACHE_MIBS, Settings, THUMBNAIL_SIZES, ThemeChoice};
+use deltaflens_core::{IMAGE_CACHE_MIBS, Settings, THUMBNAIL_SIZES, ThemeChoice, VerticalTabs};
 use gpui::{AnyElement, Context, Entity, SharedString, Window, div, prelude::*, px};
 
 use crate::{
@@ -77,6 +77,33 @@ impl SettingsView {
                 .child(option("theme-system", "System", ThemeChoice::System))
                 .child(option("theme-dark", "Dark", ThemeChoice::Dark))
                 .child(option("theme-light", "Light", ThemeChoice::Light)),
+        )
+    }
+
+    /// Hidden, as a rail, or in full.
+    fn render_vertical_tabs(
+        mode: VerticalTabs,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let option = |id: &'static str, label: &'static str, value: VerticalTabs| {
+            button(
+                id,
+                label,
+                true,
+                mode == value,
+                theme,
+                cx.listener(move |this, _, _, cx| this.change(|s| s.vertical_tabs = value, cx)),
+            )
+        };
+        row(
+            "Vertical tabs",
+            div()
+                .flex()
+                .gap_2()
+                .child(option("vertical-tabs-off", "Off", VerticalTabs::Off))
+                .child(option("vertical-tabs-rail", "Rail", VerticalTabs::Rail))
+                .child(option("vertical-tabs-full", "Full", VerticalTabs::Full)),
         )
     }
 
@@ -166,6 +193,11 @@ impl Render for SettingsView {
                     .child(error)
             }))
             .child(Self::render_theme(settings.theme, &theme, cx))
+            .child(Self::render_vertical_tabs(
+                settings.vertical_tabs,
+                &theme,
+                cx,
+            ))
             .child(Self::render_thumbnail_size(thumbnail_size, &theme, cx))
             .child(row(
                 "Show hidden files",

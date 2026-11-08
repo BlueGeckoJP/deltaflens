@@ -669,7 +669,7 @@ fn nav_button(
 
 /// A folder drawn with plain shapes in `color`, so that no icon font is
 /// needed, for an icon of `size`.
-fn folder_icon(size: f32, color: Rgba) -> impl IntoElement {
+pub(crate) fn folder_icon(size: f32, color: Rgba) -> impl IntoElement {
     // Drawn for 128 pixels.
     let scale = size / 128.;
     div()
