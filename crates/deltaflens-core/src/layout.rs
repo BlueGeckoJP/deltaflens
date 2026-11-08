@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use eyre::{Result, eyre};
 
 use crate::{PaneId, Point, Rect, Size};
@@ -496,6 +498,98 @@ impl Layout {
                 children,
             } => children.first()?.0.top_right_pane_id(),
         }
+    }
+
+    /// Names each pane after where it is, in the order of [`Self::pane_ids`]:
+    /// "Left", "Top right", "Center" and so on. The layout is cut into thirds
+    /// each way, and a pane is named after the thirds its center is in, leaving
+    /// out a middle third unless both are. Panes that would have the same name
+    /// get numbers after it. A layout of one pane has no names.
+    #[must_use]
+    pub fn pane_names(&self) -> Vec<(PaneId, String)> {
+        let rects = self.pane_rects();
+        if rects.len() < 2 {
+            return Vec::new();
+        }
+        let names: Vec<(PaneId, String)> = rects
+            .iter()
+            .map(|(id, rect)| (*id, position_name(rect)))
+            .collect();
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        for (_, name) in &names {
+            *counts.entry(name).or_default() += 1;
+        }
+        let mut numbers: HashMap<&str, usize> = HashMap::new();
+        names
+            .iter()
+            .map(|(id, name)| {
+                if counts[name.as_str()] == 1 {
+                    return (*id, name.clone());
+                }
+                let number = numbers.entry(name).or_default();
+                *number += 1;
+                (*id, format!("{name} {number}"))
+            })
+            .collect()
+    }
+
+    /// Where each pane is in a miniature of the layout, `width` × `height`
+    /// pixels large: in whole pixels, with a pixel left between neighbors.
+    #[must_use]
+    pub fn miniature(&self, width: f32, height: f32) -> Vec<(PaneId, Rect)> {
+        self.pane_rects()
+            .into_iter()
+            .map(|(id, rect)| {
+                // A pane too thin for a pixel of its own stays inside, over
+                // the edge of its neighbor.
+                let left = (rect.origin.x * width).round().min(width - 1.);
+                let top = (rect.origin.y * height).round().min(height - 1.);
+                let mut right = (right(&rect) * width).round();
+                let mut bottom = (bottom(&rect) * height).round();
+                // The gap before the neighbors on the right and below.
+                if right < width {
+                    right -= 1.;
+                }
+                if bottom < height {
+                    bottom -= 1.;
+                }
+                let rect = Rect {
+                    origin: Point { x: left, y: top },
+                    size: Size {
+                        width: (right - left).max(1.),
+                        height: (bottom - top).max(1.),
+                    },
+                };
+                (id, rect)
+            })
+            .collect()
+    }
+}
+
+/// The name of a pane at `rect` in the unit square, before telling apart
+/// panes with the same name.
+fn position_name(rect: &Rect) -> String {
+    let third = |center: f32| {
+        if center < 1. / 3. - EDGE_TOLERANCE {
+            Some(0)
+        } else if center > 2. / 3. + EDGE_TOLERANCE {
+            Some(2)
+        } else {
+            None
+        }
+    };
+    let row = third(rect.origin.y + rect.size.height / 2.).map(|third| match third {
+        0 => "Top",
+        _ => "Bottom",
+    });
+    let column = third(rect.origin.x + rect.size.width / 2.).map(|third| match third {
+        0 => "Left",
+        _ => "Right",
+    });
+    match (row, column) {
+        (None, None) => "Center".to_owned(),
+        (Some(name), None) | (None, Some(name)) => name.to_owned(),
+        (Some(row), Some(column)) => format!("{row} {}", column.to_lowercase()),
     }
 }
 
@@ -1075,5 +1169,120 @@ mod tests {
         };
         assert_eq!(layout.top_pane_ids(), Vec::new());
         assert_eq!(layout.top_right_pane_id(), None);
+    }
+
+    fn names(layout: &Layout) -> Vec<(u64, String)> {
+        layout
+            .pane_names()
+            .into_iter()
+            .map(|(id, name)| (id.0, name))
+            .collect()
+    }
+
+    fn named(names: &[(u64, &str)]) -> Vec<(u64, String)> {
+        names
+            .iter()
+            .map(|(id, name)| (*id, (*name).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn the_only_pane_has_no_name() {
+        assert_eq!(names(&pane(0)), []);
+    }
+
+    #[test]
+    fn panes_are_named_after_where_they_are() {
+        assert_eq!(
+            names(&right_side_stacked()),
+            named(&[(0, "Left"), (1, "Top right"), (2, "Bottom right")])
+        );
+        let grid = split(
+            Axis::Vertical,
+            vec![
+                (
+                    split(Axis::Horizontal, vec![(pane(0), 0.5), (pane(1), 0.5)]),
+                    0.5,
+                ),
+                (
+                    split(Axis::Horizontal, vec![(pane(2), 0.5), (pane(3), 0.5)]),
+                    0.5,
+                ),
+            ],
+        );
+        assert_eq!(
+            names(&grid),
+            named(&[
+                (0, "Top left"),
+                (1, "Top right"),
+                (2, "Bottom left"),
+                (3, "Bottom right"),
+            ])
+        );
+    }
+
+    #[test]
+    fn middle_thirds_are_left_out_of_names() {
+        let columns = split(
+            Axis::Horizontal,
+            vec![(pane(0), 1. / 3.), (pane(1), 1. / 3.), (pane(2), 1. / 3.)],
+        );
+        assert_eq!(
+            names(&columns),
+            named(&[(0, "Left"), (1, "Center"), (2, "Right")])
+        );
+        let rows = split(Axis::Vertical, vec![(pane(0), 0.5), (pane(1), 0.5)]);
+        assert_eq!(names(&rows), named(&[(0, "Top"), (1, "Bottom")]));
+    }
+
+    #[test]
+    fn panes_with_the_same_name_are_numbered() {
+        let columns = split(
+            Axis::Horizontal,
+            vec![
+                (pane(0), 0.25),
+                (pane(1), 0.25),
+                (pane(2), 0.25),
+                (pane(3), 0.25),
+            ],
+        );
+        assert_eq!(
+            names(&columns),
+            named(&[(0, "Left"), (1, "Center 1"), (2, "Center 2"), (3, "Right")])
+        );
+    }
+
+    fn rect(x: f32, y: f32, width: f32, height: f32) -> Rect {
+        Rect {
+            origin: Point { x, y },
+            size: Size { width, height },
+        }
+    }
+
+    #[test]
+    fn miniature_leaves_a_pixel_between_neighbors() {
+        assert_eq!(
+            right_side_stacked().miniature(18., 12.),
+            vec![
+                (PaneId(0), rect(0., 0., 8., 12.)),
+                (PaneId(1), rect(9., 0., 9., 5.)),
+                (PaneId(2), rect(9., 6., 9., 6.)),
+            ]
+        );
+    }
+
+    #[test]
+    fn miniature_of_one_pane_fills_it() {
+        assert_eq!(
+            pane(0).miniature(18., 12.),
+            vec![(PaneId(0), rect(0., 0., 18., 12.))]
+        );
+    }
+
+    #[test]
+    fn miniature_keeps_tiny_panes_visible() {
+        let layout = split(Axis::Horizontal, vec![(pane(0), 0.98), (pane(1), 0.02)]);
+        let miniature = layout.miniature(18., 12.);
+        assert_eq!(miniature[1], (PaneId(1), rect(17., 0., 1., 12.)));
     }
 }

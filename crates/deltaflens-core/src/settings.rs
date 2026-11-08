@@ -22,6 +22,7 @@ const SHOW_HIDDEN_FILES: &str = "show_hidden_files";
 const IMAGE_CACHE_MIB: &str = "image_cache_mib";
 const OPEN_COMMAND: &str = "open_command";
 const THEME: &str = "theme";
+const VERTICAL_TABS: &str = "vertical_tabs";
 
 /// Which colors the application uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -51,6 +52,37 @@ impl ThemeChoice {
     }
 }
 
+/// How the vertical tabs, a column at the left of the window that lists the
+/// tabs of every pane, are shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VerticalTabs {
+    /// Not shown.
+    #[default]
+    Off,
+    /// A narrow column of thumbnails.
+    Rail,
+    /// A wide column of the names of the tabs, under each pane.
+    Full,
+}
+
+impl VerticalTabs {
+    /// The value in the settings file.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Rail => "rail",
+            Self::Full => "full",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        [Self::Off, Self::Rail, Self::Full]
+            .into_iter()
+            .find(|mode| mode.name() == name)
+    }
+}
+
 /// The settings of the application.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
@@ -64,6 +96,7 @@ pub struct Settings {
     /// `<path>` stands for the file.
     pub open_command: String,
     pub theme: ThemeChoice,
+    pub vertical_tabs: VerticalTabs,
 }
 
 impl Default for Settings {
@@ -74,6 +107,7 @@ impl Default for Settings {
             image_cache_mib: 1024,
             open_command: platform::DEFAULT_OPEN_COMMAND.to_owned(),
             theme: ThemeChoice::default(),
+            vertical_tabs: VerticalTabs::default(),
         }
     }
 }
@@ -138,6 +172,11 @@ impl Settings {
                         .and_then(ThemeChoice::from_name)
                         .map(|theme| settings.theme = theme)
                         .ok_or_else(|| "\"system\", \"dark\" or \"light\"".to_owned()),
+                    VERTICAL_TABS => value
+                        .and_then(Value::as_str)
+                        .and_then(VerticalTabs::from_name)
+                        .map(|mode| settings.vertical_tabs = mode)
+                        .ok_or_else(|| "\"off\", \"rail\" or \"full\"".to_owned()),
                     _ => {
                         errors.push(format!("Unknown setting \"{key}\"."));
                         continue;
@@ -186,6 +225,9 @@ impl Settings {
         }
         if current.theme != self.theme {
             set(&mut document, THEME, self.theme.name());
+        }
+        if current.vertical_tabs != self.vertical_tabs {
+            set(&mut document, VERTICAL_TABS, self.vertical_tabs.name());
         }
         Ok(document.to_string())
     }
@@ -255,7 +297,8 @@ mod tests {
              show_hidden_files = true\n\
              image_cache_mib = 2048\n\
              open_command = \"gimp <path>\"\n\
-             theme = \"light\"\n",
+             theme = \"light\"\n\
+             vertical_tabs = \"rail\"\n",
         );
         assert_eq!(
             settings,
@@ -265,6 +308,7 @@ mod tests {
                 image_cache_mib: 2048,
                 open_command: "gimp <path>".to_owned(),
                 theme: ThemeChoice::Light,
+                vertical_tabs: VerticalTabs::Rail,
             }
         );
         assert_eq!(errors, Vec::<String>::new());
@@ -314,6 +358,28 @@ mod tests {
             ..Settings::default()
         };
         assert_eq!(settings.merge_into("").unwrap(), "theme = \"dark\"\n");
+    }
+
+    #[test]
+    fn unknown_vertical_tabs_keeps_the_default() {
+        let (settings, errors) = Settings::parse("vertical_tabs = \"wide\"\n");
+        assert_eq!(settings.vertical_tabs, VerticalTabs::Off);
+        assert_eq!(
+            errors,
+            ["\"vertical_tabs\" must be \"off\", \"rail\" or \"full\". The default is used."]
+        );
+    }
+
+    #[test]
+    fn vertical_tabs_are_written_by_name() {
+        let settings = Settings {
+            vertical_tabs: VerticalTabs::Full,
+            ..Settings::default()
+        };
+        assert_eq!(
+            settings.merge_into("").unwrap(),
+            "vertical_tabs = \"full\"\n"
+        );
     }
 
     #[test]

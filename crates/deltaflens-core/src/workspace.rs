@@ -15,6 +15,21 @@ struct ClosedTab {
     index: usize,
 }
 
+/// A pane and its tabs, as the vertical tabs show them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TabGroup<'a> {
+    pub pane_id: PaneId,
+    /// Where the pane is, such as "Top right". `None` for the only pane.
+    pub name: Option<String>,
+    pub tabs: &'a [Tab],
+    pub active: Option<TabId>,
+    /// The active tab is marked as the one keys act on: the pane is focused,
+    /// and there are other panes to tell it from.
+    pub marked: bool,
+    /// New tabs open in this pane.
+    pub destination: bool,
+}
+
 /// The layout of a window, its panes and the focused pane.
 #[derive(Debug, Clone)]
 pub struct Workspace {
@@ -544,6 +559,28 @@ impl Workspace {
             .iter()
             .find(|(_, pane)| pane.tabs().iter().any(|tab| tab.id() == tab_id))
             .map(|(&pane_id, _)| pane_id)
+    }
+
+    /// Every pane with its tabs, in the order of [`Layout::pane_ids`].
+    #[must_use]
+    pub fn tab_groups(&self) -> Vec<TabGroup<'_>> {
+        let mut names: HashMap<PaneId, String> = self.layout.pane_names().into_iter().collect();
+        let several = !matches!(self.layout, Layout::Pane(_));
+        self.layout
+            .pane_ids()
+            .into_iter()
+            .filter_map(|pane_id| {
+                let pane = self.panes.get(&pane_id)?;
+                Some(TabGroup {
+                    pane_id,
+                    name: names.remove(&pane_id),
+                    tabs: pane.tabs(),
+                    active: pane.active_tab().map(Tab::id),
+                    marked: several && pane_id == self.focused_pane,
+                    destination: self.destination == Some(pane_id),
+                })
+            })
+            .collect()
     }
 
     /// Replaces the layout, the panes and the focused pane, for restoring a
@@ -1418,5 +1455,53 @@ mod tests {
         assert_eq!(workspace.pane_of_tab(a), Some(first));
         assert_eq!(workspace.pane_of_tab(b), Some(second));
         assert_eq!(workspace.pane_of_tab(TabId(99)), None);
+    }
+
+    #[test]
+    fn tab_groups_follow_the_panes_with_their_names_and_marks() {
+        let mut workspace = Workspace::new();
+        let left = workspace.focused_pane();
+        let a = workspace.open_tab(left, viewer("a.jxl")).unwrap();
+        let right = workspace.split_pane(left, Axis::Horizontal).unwrap();
+        let b = workspace.open_tab(right, viewer("b.jxl")).unwrap();
+        workspace.toggle_destination(left).unwrap();
+
+        let groups = workspace.tab_groups();
+
+        let summary: Vec<_> = groups
+            .iter()
+            .map(|group| {
+                (
+                    group.pane_id,
+                    group.name.as_deref(),
+                    group.tabs.len(),
+                    group.active,
+                    group.marked,
+                    group.destination,
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (left, Some("Left"), 1, Some(a), false, true),
+                // The split copied `a` into the new pane, which is focused.
+                (right, Some("Right"), 2, Some(b), true, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_only_pane_is_neither_named_nor_marked() {
+        let mut workspace = Workspace::new();
+        let pane_id = workspace.focused_pane();
+        let tab_id = workspace.open_tab(pane_id, viewer("a.jxl")).unwrap();
+
+        let groups = workspace.tab_groups();
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].name, None);
+        assert_eq!(groups[0].active, Some(tab_id));
+        assert!(!groups[0].marked);
     }
 }
