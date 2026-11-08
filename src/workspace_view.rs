@@ -1618,6 +1618,9 @@ impl WorkspaceView {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    // Not the menu of the application, which the list of the
+                    // vertical tabs opens.
+                    cx.stop_propagation();
                     this.show_tab_menu(pane_id, tab_id, event.position, window, cx);
                 }),
             )
