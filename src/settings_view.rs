@@ -166,6 +166,7 @@ impl Render for SettingsView {
         let thumbnail_size = settings.thumbnail_size;
         let image_cache_mib = settings.image_cache_mib;
         let show_hidden = settings.show_hidden_files;
+        let horizontal_tabs = settings.horizontal_tabs;
         let theme = theme(cx);
         div()
             .id("settings")
@@ -197,6 +198,19 @@ impl Render for SettingsView {
                 settings.vertical_tabs,
                 &theme,
                 cx,
+            ))
+            .child(row(
+                "Horizontal tabs",
+                button(
+                    "horizontal-tabs",
+                    if horizontal_tabs { "On" } else { "Off" },
+                    true,
+                    false,
+                    &theme,
+                    cx.listener(move |this, _, _, cx| {
+                        this.change(|s| s.horizontal_tabs = !horizontal_tabs, cx);
+                    }),
+                ),
             ))
             .child(Self::render_thumbnail_size(thumbnail_size, &theme, cx))
             .child(row(

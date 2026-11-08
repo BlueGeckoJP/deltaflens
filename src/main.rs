@@ -29,7 +29,7 @@ use crate::workspace_view::{
     FocusPaneUp, GoBack, GoForward, GoUp, LayoutExplorerAndViewer, LayoutGrid, LayoutSingle,
     LayoutThreeColumns, LayoutTwoColumns, NewTab, NextImage, Open, OpenSettings, PreviousImage,
     ReopenClosedTab, ResetView, SplitDown, SplitRight, SwapPaneDown, SwapPaneLeft, SwapPaneRight,
-    SwapPaneUp, ToggleDestination, ToggleVerticalTabs, WorkspaceView,
+    SwapPaneUp, ToggleDestination, ToggleHorizontalTabs, ToggleVerticalTabs, WorkspaceView,
 };
 
 actions!(deltaflens, [Quit]);
@@ -99,6 +99,7 @@ fn main() -> Result<()> {
             KeyBinding::new("ctrl-k 5", LayoutExplorerAndViewer, None),
             KeyBinding::new("ctrl-k a", ToggleDestination, None),
             KeyBinding::new("ctrl-k v", ToggleVerticalTabs, None),
+            KeyBinding::new("ctrl-k h", ToggleHorizontalTabs, None),
             KeyBinding::new("ctrl-,", OpenSettings, None),
         ]);
         cx.bind_keys(text_input::key_bindings());

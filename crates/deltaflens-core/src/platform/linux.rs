@@ -26,10 +26,14 @@ pub fn is_hidden(path: &Path) -> bool {
         .is_some_and(|name| name.starts_with('.'))
 }
 
-/// How `path` is shown to the user, with the home directory `home` written
-/// as `~`.
+/// How `path` is shown to the user, with the home directory written as `~`.
 #[must_use]
-pub fn display_path(path: &Path, home: Option<&Path>) -> String {
+pub fn display_path(path: &Path) -> String {
+    tilde_path(path, std::env::home_dir().as_deref())
+}
+
+/// `path` with `home` written as `~`.
+fn tilde_path(path: &Path, home: Option<&Path>) -> String {
     match home.and_then(|home| path.strip_prefix(home).ok()) {
         Some(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
         Some(rest) => format!("~/{}", rest.display()),
@@ -134,16 +138,16 @@ mod tests {
     fn home_is_shown_as_a_tilde() {
         let home = Some(Path::new("/home/user"));
         assert_eq!(
-            display_path(Path::new("/home/user/Pictures"), home),
+            tilde_path(Path::new("/home/user/Pictures"), home),
             "~/Pictures"
         );
-        assert_eq!(display_path(Path::new("/home/user"), home), "~");
+        assert_eq!(tilde_path(Path::new("/home/user"), home), "~");
         assert_eq!(
-            display_path(Path::new("/home/username"), home),
+            tilde_path(Path::new("/home/username"), home),
             "/home/username"
         );
-        assert_eq!(display_path(Path::new("/srv/photos"), home), "/srv/photos");
-        assert_eq!(display_path(Path::new("/srv/photos"), None), "/srv/photos");
+        assert_eq!(tilde_path(Path::new("/srv/photos"), home), "/srv/photos");
+        assert_eq!(tilde_path(Path::new("/srv/photos"), None), "/srv/photos");
     }
 
     #[test]

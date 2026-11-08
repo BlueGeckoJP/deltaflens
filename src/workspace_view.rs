@@ -7,7 +7,7 @@ use std::{
 
 use deltaflens_core::{
     Axis, Direction, DropZone, Layout, PaneId, Preset, Session, Side, Tab, TabContent, TabId,
-    VerticalTabs, Workspace, drop_zone,
+    VerticalTabs, Workspace, drop_zone, platform,
 };
 use eyre::{Result, eyre};
 use gpui::{
@@ -62,6 +62,7 @@ actions!(
         OpenSettings,
         ToggleDestination,
         ToggleVerticalTabs,
+        ToggleHorizontalTabs,
     ]
 );
 
@@ -77,7 +78,7 @@ const MIN_DRAG_WIDTH: Pixels = px(48.);
 const DESTINATION_MARK_WIDTH: Pixels = px(28.);
 /// An anchor on a 12 × 12 grid, at the centers of the pixels so that the
 /// straight lines stay sharp.
-const ANCHOR_LINES: &[[(f32, f32); 2]] = &[
+pub(crate) const ANCHOR_LINES: &[[(f32, f32); 2]] = &[
     // The ring.
     [(5.5, 0.5), (7.5, 0.5)],
     [(7.5, 0.5), (7.5, 2.5)],
@@ -165,6 +166,16 @@ struct TitleBarPart {
     controls: bool,
     round_top_left: bool,
     round_top_right: bool,
+}
+
+/// What the content of a pane shows over it when the pane has no tab bar to
+/// show it.
+#[derive(Clone, Copy)]
+struct PaneMarks {
+    /// Keys act on this pane, the focused one of several.
+    focused: bool,
+    /// New tabs open in this pane.
+    destination: bool,
 }
 
 /// The UI state of a tab.
@@ -442,6 +453,11 @@ impl WorkspaceView {
                 }
                 let content = TabContent::Viewer { path: path.clone() };
                 self.open_tab(content, window, cx);
+            }
+            ExplorerEvent::DestinationMarkClicked => {
+                if let Some(pane_id) = self.workspace.pane_of_tab(tab_id) {
+                    self.toggle_destination_of(pane_id, cx);
+                }
             }
         }
     }
@@ -949,6 +965,24 @@ impl WorkspaceView {
         self.set_vertical_tabs(mode, cx);
     }
 
+    /// Whether each pane has a tab bar.
+    fn horizontal_tabs(&self, cx: &App) -> bool {
+        self.settings.read(cx).settings().horizontal_tabs
+    }
+
+    /// Shows or hides the tab bars, and saves it in the settings.
+    fn toggle_horizontal_tabs(
+        &mut self,
+        _: &ToggleHorizontalTabs,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let shown = self.horizontal_tabs(cx);
+        self.settings.update(cx, |settings, cx| {
+            settings.update(|s| s.horizontal_tabs = !shown, cx);
+        });
+    }
+
     fn focus_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
         if self.workspace.focused_pane() != pane_id {
             if let Err(error) = self.workspace.focus_pane(pane_id) {
@@ -1048,6 +1082,7 @@ impl WorkspaceView {
         let window_menu =
             window_frame::client_tiling(window).is_some() && window.window_controls().window_menu;
         let vertical_tabs = self.vertical_tabs(cx);
+        let horizontal_tabs = self.horizontal_tabs(cx);
         let this = cx.entity().downgrade();
         let show_vertical_tabs = |mode: VerticalTabs| {
             let this = this.clone();
@@ -1077,6 +1112,8 @@ impl WorkspaceView {
             .action("Grid", LayoutGrid, true, window)
             .action("Explorer and viewer", LayoutExplorerAndViewer, true, window)
             .separator()
+            .action("Horizontal tabs", ToggleHorizontalTabs, true, window)
+            .checked(horizontal_tabs)
             .item("No vertical tabs", show_vertical_tabs(VerticalTabs::Off))
             .checked(vertical_tabs == VerticalTabs::Off)
             .item(
@@ -1343,8 +1380,25 @@ impl WorkspaceView {
         let marked = self.workspace.focused_pane() == pane_id
             && !matches!(self.workspace.layout(), Layout::Pane(_));
         let destination = self.workspace.destination() == Some(pane_id);
-        let show_tab_bar = !pane.tabs().is_empty() || title_bar.is_some() || destination;
-        let content = match active.and_then(|tab_id| self.views.get(&tab_id)) {
+        let horizontal_tabs = self.horizontal_tabs(cx);
+        let show_tab_bar =
+            horizontal_tabs && (!pane.tabs().is_empty() || title_bar.is_some() || destination);
+        let view = active.and_then(|tab_id| self.views.get(&tab_id));
+        // Without a tab bar, an explorer shows the mark of the destination in
+        // its toolbar, as a mark over the pane would hide its buttons.
+        let explorer = match view {
+            Some(TabView::Explorer(explorer)) => Some(explorer),
+            _ => None,
+        };
+        if let Some(explorer) = explorer {
+            let mark = !horizontal_tabs && destination;
+            explorer.update(cx, |explorer, _| explorer.set_destination_mark(mark));
+        }
+        let marks = PaneMarks {
+            focused: !horizontal_tabs && marked,
+            destination: !horizontal_tabs && destination && explorer.is_none(),
+        };
+        let content = match view {
             Some(view) => view.to_element(),
             None => div()
                 .size_full()
@@ -1388,17 +1442,20 @@ impl WorkspaceView {
                     cx,
                 ))
             })
-            .child(self.render_pane_content(pane_id, content, cx))
+            .child(self.render_pane_content(pane_id, content, marks, cx))
             .into_any_element()
     }
 
-    /// The content of a pane, which takes tabs and images dropped on it.
+    /// The content of a pane, which takes tabs and images dropped on it, with
+    /// `marks` over it.
     fn render_pane_content(
         &self,
         pane_id: PaneId,
         content: AnyElement,
+        marks: PaneMarks,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let theme = theme(cx);
         let zone = self
             .drop_target
             .filter(|(id, _)| *id == pane_id && cx.has_active_drag())
@@ -1426,9 +1483,128 @@ impl WorkspaceView {
                 }),
             )
             .child(content)
-            .when_some(zone, |this, zone| {
-                this.child(render_drop_zone(zone, theme(cx).drop_zone))
+            .when(marks.focused, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .w_full()
+                        .h(px(2.))
+                        .bg(theme.accent),
+                )
             })
+            .when(marks.destination, |this| {
+                this.child(Self::render_destination_badge(pane_id, cx))
+            })
+            .when_some(zone, |this, zone| {
+                this.child(render_drop_zone(zone, theme.drop_zone))
+            })
+    }
+
+    /// The anchor over the top left corner of the destination, when it has
+    /// no tab bar. Clicking it stops the pane being the destination.
+    fn render_destination_badge(pane_id: PaneId, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = theme(cx);
+        div()
+            .id(ElementId::Name(
+                format!("destination-badge-{pane_id:?}").into(),
+            ))
+            .absolute()
+            .top(px(6.))
+            .left(px(6.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(26.))
+            .rounded_sm()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.tab_bar)
+            .hover(move |style| style.bg(theme.element_hover))
+            // Keep presses on it from also panning a viewer under it.
+            .occlude()
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.toggle_destination_of(pane_id, cx);
+            }))
+            .child(anchor_icon(theme.accent))
+    }
+
+    /// The title bar over the panes when they have no tab bars: the name and
+    /// the folder of the active tab, and the window buttons when the app
+    /// draws the window frame. It moves the window as the tab bars do, and
+    /// right-clicking it opens the menu of the application.
+    fn render_title_strip(
+        &self,
+        vertical_tabs: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = theme(cx);
+        let tiling = window_frame::client_tiling(window);
+        // The vertical tabs take the top left corner when they are shown.
+        let round_top_left =
+            !vertical_tabs && tiling.is_some_and(|tiling| !tiling.top && !tiling.left);
+        let round_top_right = tiling.is_some_and(|tiling| !tiling.top && !tiling.right);
+        let (name, folder) = match self.active_tab() {
+            Some(tab) => (
+                tab_name(tab),
+                tab.content().folder().map(platform::display_path),
+            ),
+            None => (APP_NAME.to_owned(), None),
+        };
+        let title = div()
+            .id("title-strip")
+            .flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .items_center()
+            .gap_2()
+            .pl_3()
+            .pr(MIN_DRAG_WIDTH)
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.show_app_menu(event.position, window, cx);
+                }),
+            )
+            // The folder gives way first, then the name, down to half of the
+            // title.
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .max_w(relative(0.5))
+                    .truncate()
+                    .text_color(theme.text_strong)
+                    .child(name),
+            )
+            .children(folder.map(|folder| {
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(theme.text_muted)
+                    .child(folder)
+            }));
+        let title = if tiling.is_some() {
+            Self::moves_window(title, window, cx)
+        } else {
+            title
+        };
+        div()
+            .flex()
+            .flex_shrink_0()
+            .w_full()
+            .h(TAB_BAR_HEIGHT)
+            .bg(theme.tab_bar)
+            .text_sm()
+            .when(round_top_left, |this| this.rounded_tl(ROUNDING))
+            .when(round_top_right, |this| this.rounded_tr(ROUNDING))
+            .child(title)
+            .when(tiling.is_some(), |this| {
+                this.child(window_frame::window_controls(window, round_top_right, cx))
+            })
+            .into_any_element()
     }
 
     /// `marked` is the active tab of the focused pane, when the focus is worth
@@ -1506,15 +1682,7 @@ impl WorkspaceView {
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 this.toggle_destination_of(pane_id, cx);
             }))
-            .child(
-                canvas(
-                    |_, _, _| {},
-                    move |bounds, (), window, _| {
-                        window_frame::paint_lines(ANCHOR_LINES, theme.accent, bounds, window);
-                    },
-                )
-                .size(px(12.)),
-            )
+            .child(anchor_icon(theme.accent))
     }
 
     fn render_tab(
@@ -1709,6 +1877,16 @@ impl WorkspaceView {
 
 /// The part of a pane that a drop in `zone` would take: all of it, or the half
 /// on that side.
+/// The anchor that marks the destination of new tabs, drawn in `color`.
+pub(crate) fn anchor_icon(color: Rgba) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, (), window, _| window_frame::paint_lines(ANCHOR_LINES, color, bounds, window),
+    )
+    .flex_shrink_0()
+    .size(px(12.))
+}
+
 /// The part of a pane that a dragged tab or image would take, shown over it
 /// in `color`.
 fn render_drop_zone(zone: DropZone, color: Rgba) -> impl IntoElement {
@@ -1754,9 +1932,18 @@ impl Render for WorkspaceView {
             self.drop_target = None;
         }
         let vertical_tabs = self.vertical_tabs(cx);
-        let title_bar = self.title_bar_parts(vertical_tabs != VerticalTabs::Off, window);
-        let vertical_tabs = (vertical_tabs != VerticalTabs::Off)
-            .then(|| self.render_vertical_tabs(vertical_tabs, window, cx));
+        let vertical_shown = vertical_tabs != VerticalTabs::Off;
+        // Without tab bars, a title bar over the panes takes their part.
+        let horizontal_tabs = self.horizontal_tabs(cx);
+        let title_bar = if horizontal_tabs {
+            self.title_bar_parts(vertical_shown, window)
+        } else {
+            HashMap::new()
+        };
+        let title_strip =
+            (!horizontal_tabs).then(|| self.render_title_strip(vertical_shown, window, cx));
+        let vertical_tabs =
+            vertical_shown.then(|| self.render_vertical_tabs(vertical_tabs, window, cx));
         let content = div()
             .size_full()
             .track_focus(&self.focus_handle)
@@ -1790,6 +1977,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::reopen_closed_tab))
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::toggle_vertical_tabs))
+            .on_action(cx.listener(Self::toggle_horizontal_tabs))
             .flex()
             .flex_col()
             .child(
@@ -1798,13 +1986,22 @@ impl Render for WorkspaceView {
                     .min_h_0()
                     .flex()
                     .children(vertical_tabs)
-                    .child(div().flex_1().min_w_0().h_full().child(self.render_layout(
-                        self.workspace.layout(),
-                        &[],
-                        &title_bar,
-                        window,
-                        cx,
-                    ))),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .children(title_strip)
+                            .child(div().flex_1().min_h_0().child(self.render_layout(
+                                self.workspace.layout(),
+                                &[],
+                                &title_bar,
+                                window,
+                                cx,
+                            ))),
+                    ),
             )
             .children(self.render_settings_errors(cx))
             .child(self.context_menu.clone());
