@@ -5,10 +5,18 @@ use std::rc::Rc;
 
 use gpui::{
     Action, App, ClickEvent, Context, Entity, KeybindingKeystroke, Modifiers, MouseDownEvent,
-    Pixels, Point, SharedString, Window, anchored, deferred, div, prelude::*, px,
+    Pixels, Point, Rgba, SharedString, Window, anchored, canvas, deferred, div, prelude::*, px,
 };
 
-use crate::theme::{Theme, theme};
+use crate::{
+    theme::{Theme, theme},
+    window_frame::paint_lines,
+};
+
+/// The size of the square that holds a check mark.
+const CHECK_SIZE: Pixels = px(12.);
+/// A check mark on a 12 × 12 grid.
+const CHECK_LINES: &[[(f32, f32); 2]] = &[[(2., 6.5), (5., 9.5)], [(5., 9.5), (10.5, 3.)]];
 
 /// What an item does when clicked.
 type Handler = Rc<dyn Fn(&mut Window, &mut App)>;
@@ -33,6 +41,9 @@ struct Entry {
     /// The key of the action, if it has one.
     shortcut: Option<SharedString>,
     enabled: bool,
+    /// `Some` for an item that is on or off, which shows a check mark when
+    /// on.
+    checked: Option<bool>,
     command: Command,
 }
 
@@ -73,6 +84,7 @@ impl Menu {
             label: label.into(),
             shortcut: None,
             enabled,
+            checked: None,
             command: Command::Run(Rc::new(handler)),
         }));
         self
@@ -94,8 +106,19 @@ impl Menu {
             label: label.into(),
             shortcut,
             enabled,
+            checked: None,
             command: Command::Action(Box::new(action)),
         }));
+        self
+    }
+
+    /// Makes the item added last one that is on or off, with a check mark
+    /// when `checked`. The items of a menu with such items leave room for the
+    /// mark.
+    pub fn checked(mut self, checked: bool) -> Self {
+        if let Some(Item::Entry(entry)) = self.items.last_mut() {
+            entry.checked = Some(checked);
+        }
         self
     }
 
@@ -138,9 +161,11 @@ impl ContextMenu {
     }
 }
 
+/// `marks` leaves room for a check mark in front of the label.
 fn render_entry(
     index: usize,
     entry: &Entry,
+    marks: bool,
     before_actions: Option<&Handler>,
     context_menu: Entity<ContextMenu>,
     theme: &Theme,
@@ -173,7 +198,16 @@ fn render_entry(
         .py_1()
         .rounded_sm()
         .text_color(label_color)
-        .child(entry.label.clone())
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .when(marks, |this| {
+                    this.child(check_mark(entry.checked == Some(true), label_color))
+                })
+                .child(entry.label.clone()),
+        )
         .children(
             entry
                 .shortcut
@@ -191,6 +225,22 @@ fn render_entry(
         })
 }
 
+/// The room for a check mark, with the mark when `checked`.
+fn check_mark(checked: bool, color: Rgba) -> impl IntoElement {
+    div()
+        .flex_shrink_0()
+        .size(CHECK_SIZE)
+        .when(checked, |this| {
+            this.child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, (), window, _| paint_lines(CHECK_LINES, color, bounds, window),
+                )
+                .size_full(),
+            )
+        })
+}
+
 impl Render for ContextMenu {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(menu) = &self.menu else {
@@ -198,6 +248,10 @@ impl Render for ContextMenu {
         };
         let theme = theme(cx);
         let entity = cx.entity();
+        let marks = menu
+            .items
+            .iter()
+            .any(|item| matches!(item, Item::Entry(entry) if entry.checked.is_some()));
         let items: Vec<_> = menu
             .items
             .iter()
@@ -206,6 +260,7 @@ impl Render for ContextMenu {
                 Item::Entry(entry) => render_entry(
                     index,
                     entry,
+                    marks,
                     menu.before_actions.as_ref(),
                     entity.clone(),
                     &theme,
