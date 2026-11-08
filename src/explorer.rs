@@ -497,7 +497,7 @@ impl Explorer {
         let name_for_preview = name.clone();
         let theme = theme(cx);
         let icon = match entry.kind {
-            EntryKind::Folder => folder_icon(icon_size, theme.folder).into_any_element(),
+            EntryKind::Folder => folder_icon(icon_size, theme.folder, true).into_any_element(),
             EntryKind::Image => {
                 let key = ThumbnailKey {
                     path: entry.path.clone(),
@@ -668,8 +668,9 @@ fn nav_button(
 }
 
 /// A folder drawn with plain shapes in `color`, so that no icon font is
-/// needed, for an icon of `size`.
-fn folder_icon(size: f32, color: Rgba) -> impl IntoElement {
+/// needed, for an icon of `size`. Its corners are rounded when `rounded`,
+/// which suits only large icons.
+pub(crate) fn folder_icon(size: f32, color: Rgba, rounded: bool) -> impl IntoElement {
     // Drawn for 128 pixels.
     let scale = size / 128.;
     div()
@@ -680,15 +681,14 @@ fn folder_icon(size: f32, color: Rgba) -> impl IntoElement {
             div()
                 .w(px(40. * scale))
                 .h(px(10. * scale))
-                .rounded_t_md()
+                .when(rounded, Styled::rounded_t_md)
                 .bg(color),
         )
         .child(
             div()
                 .w_full()
                 .h(px(74. * scale))
-                .rounded_md()
-                .rounded_tl_none()
+                .when(rounded, |this| this.rounded_md().rounded_tl_none())
                 .bg(color),
         )
 }
