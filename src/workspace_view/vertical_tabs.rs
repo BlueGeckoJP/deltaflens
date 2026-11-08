@@ -121,7 +121,6 @@ fn miniature(rects: &[(PaneId, Rect)], pane_id: PaneId, theme: &Theme) -> impl I
                 .top(px(rect.origin.y))
                 .w(px(rect.size.width))
                 .h(px(rect.size.height))
-                .rounded(px(1.))
                 .bg(if *id == pane_id {
                     theme.text
                 } else {
@@ -636,7 +635,7 @@ impl WorkspaceView {
                 .items_center()
                 .justify_center()
                 .size(px(size))
-                .child(folder_icon(size * 0.8, theme.folder))
+                .child(folder_icon(size * 0.8, theme.folder, false))
                 .into_any_element(),
             TabContent::Settings => {
                 line_icon(SETTINGS_LINES, ROW_ICON_SIZE, theme.text_muted).into_any_element()
