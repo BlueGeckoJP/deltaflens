@@ -63,6 +63,7 @@ actions!(
         ToggleDestination,
         ToggleVerticalTabs,
         ToggleHorizontalTabs,
+        TogglePlayback,
     ]
 );
 
@@ -538,6 +539,12 @@ impl WorkspaceView {
     fn reset_view(&mut self, _: &ResetView, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(viewer) = self.active_viewer() {
             viewer.update(cx, Viewer::reset_view);
+        }
+    }
+
+    fn toggle_playback(&mut self, _: &TogglePlayback, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(viewer) = self.active_viewer() {
+            viewer.update(cx, Viewer::toggle_playback);
         }
     }
 
@@ -1954,6 +1961,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::activate_next_tab))
             .on_action(cx.listener(Self::activate_previous_tab))
             .on_action(cx.listener(Self::reset_view))
+            .on_action(cx.listener(Self::toggle_playback))
             .on_action(cx.listener(Self::previous_image))
             .on_action(cx.listener(Self::next_image))
             .on_action(cx.listener(Self::go_back))

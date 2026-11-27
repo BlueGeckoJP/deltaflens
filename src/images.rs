@@ -14,11 +14,14 @@ use gpui::{
     AppContext as _, Context, Entity, EntityId, EventEmitter, RenderImage, SharedString, Task,
 };
 
-use crate::{render_image::to_render_image, settings::SettingsStore};
+use crate::{
+    render_image::{release_textures, to_render_image},
+    settings::SettingsStore,
+};
 
 /// The largest texture assumed to be possible, in pixels on each side. gpui
 /// does not tell the limit of the GPU; desktop GPUs have at least 8192.
-const MAX_TEXTURE_SIZE: u32 = 8192;
+pub(crate) const MAX_TEXTURE_SIZE: u32 = 8192;
 /// The largest tile of an image that does not fit in a texture.
 const MAX_TILE_SIZE: u32 = 2048;
 /// At most this many images are decoded ahead of time at once, so that the
@@ -269,7 +272,7 @@ impl Images {
             .filter_map(|&index| picture.tiles.get(index))
             .map(|(_, tile)| tile.clone())
             .collect();
-        Self::release_textures(unused, cx);
+        release_textures(unused, cx);
     }
 
     /// Pins the images shown or to be shown, cancels the decoding of images
@@ -424,21 +427,7 @@ impl Images {
         for picture in pictures {
             images.extend(picture.textures().cloned());
         }
-        Self::release_textures(images, cx);
-    }
-
-    /// Frees the textures of `images`, if they have any.
-    fn release_textures(images: Vec<Arc<RenderImage>>, cx: &mut Context<Self>) {
-        if images.is_empty() {
-            return;
-        }
-        // Wait until no window is being updated or drawn, as `drop_image`
-        // would miss it.
-        cx.defer(move |cx| {
-            for image in images {
-                cx.drop_image(image, None);
-            }
-        });
+        release_textures(images, cx);
     }
 }
 

@@ -6,9 +6,9 @@ use std::ops::Range;
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding,
-    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div,
-    fill, point, prelude::*, px, relative, size,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NoAction, PaintQuad,
+    Pixels, Point, ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle,
+    Window, actions, div, fill, point, prelude::*, px, relative, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -52,6 +52,8 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-c", Copy, Some(CONTEXT)),
         KeyBinding::new("ctrl-x", Cut, Some(CONTEXT)),
         KeyBinding::new("enter", Submit, Some(CONTEXT)),
+        // Typed, instead of playing or pausing an animation.
+        KeyBinding::new("space", NoAction, Some(CONTEXT)),
     ]
 }
 

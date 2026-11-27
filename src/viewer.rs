@@ -5,22 +5,24 @@ use std::{
 };
 
 use deltaflens_core::{
-    Direction, Rect, ViewTransform, downscaled_size, list_images, neighbor_image, prefetch_images,
-    visible_tiles,
+    Direction, PlaybackState, Rect, ViewTransform, downscaled_size, list_images, neighbor_image,
+    prefetch_images, visible_tiles,
 };
 use gpui::{
-    Bounds, Context, CursorStyle, DispatchPhase, Entity, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, RenderImage, ScrollDelta, ScrollEvent, SharedString,
-    Task, Window, canvas, div, point, prelude::*, px, size,
+    App, Bounds, ClickEvent, Context, CursorStyle, DispatchPhase, Entity, FontFeatures,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, RenderImage,
+    Rgba, ScrollDelta, ScrollEvent, SharedString, Subscription, Task, Window, canvas, div, fill,
+    point, prelude::*, px, size,
 };
 
 use crate::{
     file_actions,
     images::{ImageKey, Images, ImagesEvent, Picture, Request},
     menu::{ContextMenu, Menu},
+    playback::{NotAnimated, Playback, Resume, frame_at, seek_fraction},
     settings::SettingsStore,
-    theme::theme,
-    workspace_view::{NextImage, PreviousImage, ResetView, SplitDown, SplitRight},
+    theme::{Theme, theme},
+    workspace_view::{NextImage, PreviousImage, ResetView, SplitDown, SplitRight, TogglePlayback},
 };
 
 /// How much one wheel notch zooms.
@@ -34,6 +36,27 @@ const PREFETCH_COUNT: usize = 2;
 /// How long the scale must stay the same before a downscaled image is made
 /// for it, so that zooming and resizing do not make one at every step.
 const DOWNSCALE_DELAY: Duration = Duration::from_millis(200);
+
+/// The size of the play and pause button of an animation.
+const PLAY_BUTTON_SIZE: Pixels = px(22.);
+/// The size of the square that holds the play and pause icons.
+const PLAY_ICON_SIZE: Pixels = px(12.);
+/// A play triangle on a 12 × 12 grid.
+const PLAY_TRIANGLE: [(f32, f32); 3] = [(3., 2.), (10., 6.), (3., 10.)];
+/// The two bars of a pause icon on a 12 × 12 grid, as left, top, right and
+/// bottom.
+const PAUSE_BARS: [[f32; 4]; 2] = [[3., 2., 5., 10.], [7., 2., 9., 10.]];
+/// The width of the seek bar, which gets narrower in a narrow viewer, down to
+/// the smaller width.
+const SEEK_BAR_WIDTH: Pixels = px(200.);
+const MIN_SEEK_BAR_WIDTH: Pixels = px(48.);
+const SEEK_BAR_HEIGHT: Pixels = px(16.);
+const SEEK_TRACK_HEIGHT: Pixels = px(4.);
+/// The diameter of the thumb of the seek bar, which stays within the bar.
+const SEEK_THUMB_SIZE: Pixels = px(10.);
+/// About the width of a digit of the frame numbers, to keep their room the
+/// same as they change.
+const DIGIT_WIDTH: f32 = 7.;
 
 /// Shows one image, fitted to the viewer or zoomed and panned by the user.
 pub struct Viewer {
@@ -67,8 +90,8 @@ pub struct Viewer {
     placed: Option<ImageKey>,
     /// The bounds and scale factor of the last frame, used by input handlers.
     viewport: Option<(Bounds<Pixels>, f32)>,
-    /// The last mouse position while panning.
-    drag_position: Option<gpui::Point<Pixels>>,
+    /// The active left-button interaction, if any.
+    drag: Option<Drag>,
     /// Whether moving between images includes hidden files.
     show_hidden: bool,
     /// The images in the folder of the current image, reused while moving
@@ -80,6 +103,36 @@ pub struct Viewer {
     context_menu: Entity<ContextMenu>,
     /// The error of the last action from the context menu.
     notice: Option<SharedString>,
+    /// The animation of the current image, played while the tab is visible.
+    animation: Option<Animation>,
+    /// Where the animation of an image was left when the tab was hidden, to
+    /// go on from there when it is shown again.
+    resume: Option<(ImageKey, Resume)>,
+    /// The image last found not to be an animation, so that it is not opened
+    /// as one again each time it is shown.
+    still: Option<ImageKey>,
+    /// The bounds of the seek bar in the last frame, to tell the frame under
+    /// the mouse.
+    seek_bar: Option<Bounds<Pixels>>,
+}
+
+/// An active left-button interaction in the viewer.
+enum Drag {
+    /// Panning the image, with the last mouse position.
+    Pan(gpui::Point<Pixels>),
+    /// Dragging the seek bar of an animation.
+    Scrub,
+    /// A left press on the animation controls, ignored by the viewer so it
+    /// does not pan while still bubbling up to take keyboard focus back from
+    /// a text field.
+    Controls,
+}
+
+/// The animation of an image, played by a session of its own.
+struct Animation {
+    key: ImageKey,
+    playback: Entity<Playback>,
+    _subscriptions: [Subscription; 2],
 }
 
 struct Folder {
@@ -131,13 +184,17 @@ impl Viewer {
             transform: ViewTransform::default(),
             placed: None,
             viewport: None,
-            drag_position: None,
+            drag: None,
             show_hidden,
             folder: None,
             folder_task: None,
             settings: settings.clone(),
             context_menu,
             notice: None,
+            animation: None,
+            resume: None,
+            still: None,
+            seek_bar: None,
         };
         this.load(path, Direction::Next, cx);
         this
@@ -146,7 +203,14 @@ impl Viewer {
     /// Shows `path`, reached by moving in `direction`. Unless it is decoded
     /// already, the current image stays visible until it is.
     pub fn load(&mut self, path: PathBuf, direction: Direction, cx: &mut Context<Self>) {
-        self.key = ImageKey::new(path);
+        let key = ImageKey::new(path);
+        if key != self.key {
+            // Ends the session of the image before, and its thread.
+            self.animation = None;
+            self.resume = None;
+            self.clear_scrub();
+        }
+        self.key = key;
         self.direction = direction;
         self.notice = None;
         self.wanted_downscaled = None;
@@ -159,7 +223,8 @@ impl Viewer {
     }
 
     /// Shows or hides the tab. A hidden viewer lets go of its image, and
-    /// decodes it again when shown unless it is still in memory.
+    /// decodes it again when shown unless it is still in memory. An animation
+    /// stops, and goes on from the same frame when shown again.
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if self.visible == visible {
             return;
@@ -172,6 +237,7 @@ impl Viewer {
             self.downscaled = None;
             self.wanted_downscaled = None;
             self.downscale_task = None;
+            self.suspend_animation(cx);
         }
         self.request(cx);
         cx.notify();
@@ -247,7 +313,7 @@ impl Viewer {
     /// [`DOWNSCALE_DELAY`]. One already made is used at once.
     fn on_layout(&mut self, bounds: Bounds<Pixels>, scale_factor: f32, cx: &mut Context<Self>) {
         self.viewport = Some((bounds, scale_factor));
-        let wanted = self.downscaled_key();
+        let wanted = self.downscaled_key(cx);
         if wanted == self.wanted_downscaled {
             // Back to the scale before a change that did not last.
             self.downscale_task = None;
@@ -294,8 +360,13 @@ impl Viewer {
     }
 
     /// The key of the smaller version of the current image for the scale it is
-    /// shown at, or `None` if the image itself is to be drawn.
-    fn downscaled_key(&self) -> Option<ImageKey> {
+    /// shown at, or `None` if the image itself is to be drawn. The frames of
+    /// an animation are always drawn as they are, scaled down by the GPU, as
+    /// it would take as long to make smaller versions of them.
+    fn downscaled_key(&self, cx: &App) -> Option<ImageKey> {
+        if self.playback_state(cx).is_some() {
+            return None;
+        }
         let (key, picture) = self.image.as_ref().filter(|(key, _)| *key == self.key)?;
         let (image_size, viewport) = self.sizes()?;
         // The scale of logical sizes is also that of device pixels shown to
@@ -376,14 +447,162 @@ impl Viewer {
             self.transform.reset();
             self.placed = Some(self.key.clone());
         }
+        // An image larger than a texture is shown in tiles, still.
+        if image.tiles.is_empty() {
+            self.play(cx);
+        }
         self.image = Some((self.key.clone(), image));
         self.error = None;
+        cx.notify();
+    }
+
+    /// Plays the current image if it is an animation, from where it was left
+    /// if the tab was hidden. Until its first frame is decoded, the image
+    /// itself is drawn.
+    fn play(&mut self, cx: &mut Context<Self>) {
+        let playing = self
+            .animation
+            .as_ref()
+            .is_some_and(|animation| animation.key == self.key);
+        if playing || self.still.as_ref() == Some(&self.key) {
+            return;
+        }
+        let resume = self
+            .resume
+            .take()
+            .filter(|(key, _)| *key == self.key)
+            .map(|(_, resume)| resume);
+        let key = self.key.clone();
+        let playback = cx.new(|cx| Playback::new(&key.path, resume, cx));
+        let subscriptions = [
+            cx.observe(&playback, |this, playback, cx| {
+                this.on_playback_changed(&playback, cx);
+            }),
+            cx.subscribe(&playback, |this, playback, _: &NotAnimated, cx| {
+                this.on_not_animated(&playback, cx);
+            }),
+        ];
+        self.animation = Some(Animation {
+            key,
+            playback,
+            _subscriptions: subscriptions,
+        });
+    }
+
+    fn on_playback_changed(&mut self, playback: &Entity<Playback>, cx: &mut Context<Self>) {
+        // Smaller versions are not used for an animation.
+        let animated = playback.read(cx).state().is_some();
+        if animated
+            && (self.downscaled.is_some()
+                || self.wanted_downscaled.is_some()
+                || self.downscale_task.is_some())
+        {
+            self.want_downscaled(None, cx);
+        }
+        cx.notify();
+    }
+
+    fn on_not_animated(&mut self, playback: &Entity<Playback>, cx: &mut Context<Self>) {
+        let current = self
+            .animation
+            .as_ref()
+            .is_some_and(|animation| animation.playback == *playback);
+        if let Some(animation) = self.animation.take_if(|_| current) {
+            self.still = Some(animation.key);
+            self.clear_scrub();
+            cx.notify();
+        }
+    }
+
+    /// Stops playing, keeping where the animation is to go on from there.
+    /// Dropping the session ends its thread and frees its textures.
+    fn suspend_animation(&mut self, cx: &mut Context<Self>) {
+        self.clear_scrub();
+        if let Some(animation) = self.animation.take() {
+            self.resume = animation
+                .playback
+                .read(cx)
+                .resume_point()
+                .map(|resume| (animation.key, resume));
+        }
+    }
+
+    fn clear_scrub(&mut self) {
+        if matches!(self.drag, Some(Drag::Scrub)) {
+            self.drag = None;
+        }
+    }
+
+    /// The state of playing the current image, once it is known to be an
+    /// animation.
+    fn playback_state<'a>(&self, cx: &'a App) -> Option<&'a PlaybackState> {
+        self.animation.as_ref()?.playback.read(cx).state()
+    }
+
+    /// Plays or pauses the animation, if the image is one.
+    pub fn toggle_playback(&mut self, cx: &mut Context<Self>) {
+        if let Some(animation) = &self.animation {
+            animation.playback.update(cx, Playback::toggle_play_pause);
+        }
+    }
+
+    /// The frame under `x` on the seek bar.
+    fn frame_under(&self, x: Pixels, cx: &App) -> Option<usize> {
+        let bounds = self.seek_bar?;
+        let frame_count = self.playback_state(cx)?.frame_count();
+        // The thumb stays within the bar.
+        let start = bounds.left() + SEEK_THUMB_SIZE * 0.5;
+        let length = bounds.size.width - SEEK_THUMB_SIZE;
+        Some(frame_at(x.into(), start.into(), length.into(), frame_count))
+    }
+
+    /// Starts dragging the seek bar, which moves to the frame under the
+    /// mouse at once.
+    fn on_seek_bar_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(frame) = self.frame_under(event.position.x, cx) else {
+            return;
+        };
+        let Some(animation) = &self.animation else {
+            return;
+        };
+        animation.playback.update(cx, |playback, cx| {
+            playback.begin_scrub(cx);
+            playback.scrub_to(frame, cx);
+        });
+        self.drag = Some(Drag::Scrub);
+        cx.notify();
+    }
+
+    fn on_scrub(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if !matches!(self.drag, Some(Drag::Scrub)) {
+            return;
+        }
+        let Some(frame) = self.frame_under(event.position.x, cx) else {
+            return;
+        };
+        if let Some(animation) = &self.animation {
+            animation
+                .playback
+                .update(cx, |playback, cx| playback.scrub_to(frame, cx));
+        }
+    }
+
+    fn on_scrub_end(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.drag, Some(Drag::Scrub)) {
+            return;
+        }
+        self.drag = None;
+        if let Some(animation) = &self.animation {
+            animation.playback.update(cx, Playback::end_scrub);
+        }
         cx.notify();
     }
 
     fn show_error(&mut self, error: SharedString, cx: &mut Context<Self>) {
         self.image = None;
         self.downscaled = None;
+        self.animation = None;
+        self.clear_scrub();
         self.error = Some(error);
         self.transform.reset();
         self.placed = None;
@@ -423,7 +642,15 @@ impl Viewer {
     }
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.drag_position = Some(event.position);
+        match self.drag {
+            Some(Drag::Controls) => {
+                self.drag = None;
+                return;
+            }
+            Some(Drag::Scrub) => return,
+            Some(Drag::Pan(_)) | None => {}
+        }
+        self.drag = Some(Drag::Pan(event.position));
         cx.notify();
     }
 
@@ -433,7 +660,12 @@ impl Viewer {
         let path = self.key.path.clone();
         let this = cx.entity().downgrade();
         let open_command = self.settings.read(cx).settings().open_command.clone();
+        let playing = self.playback_state(cx).map(PlaybackState::is_playing);
         let menu = Menu::new(event.position)
+            .when_some(playing, |menu, playing| {
+                let label = if playing { "Pause" } else { "Play" };
+                menu.action(label, TogglePlayback, true, window).separator()
+            })
             .action(
                 "Previous image",
                 PreviousImage,
@@ -491,26 +723,29 @@ impl Viewer {
     }
 
     fn on_drag(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
-        let Some(last) = self.drag_position.replace(event.position) else {
+        let Some(Drag::Pan(last)) = self.drag.as_mut() else {
             return;
         };
+        let delta = event.position - *last;
+        *last = event.position;
         let Some((image, viewport)) = self.sizes() else {
             return;
         };
-        self.transform
-            .pan_by(to_core_point(event.position - last), image, viewport);
+        self.transform.pan_by(to_core_point(delta), image, viewport);
         cx.notify();
     }
 
     fn on_drag_end(&mut self, cx: &mut Context<Self>) {
-        self.drag_position = None;
-        cx.notify();
+        if matches!(self.drag, Some(Drag::Pan(_))) {
+            self.drag = None;
+            cx.notify();
+        }
     }
 
-    /// Draws the smallest version of the image that has at least as many
-    /// pixels as the screen shows, so that it is not enlarged: the downscaled
-    /// one, the image itself, or the tiles of a large image that are on
-    /// screen.
+    /// Draws the frame of the animation being played, or else the smallest
+    /// version of the image that has at least as many pixels as the screen
+    /// shows, so that it is not enlarged: the downscaled one, the image
+    /// itself, or the tiles of a large image that are on screen.
     fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let Some((key, picture)) = &self.image else {
             return;
@@ -520,10 +755,16 @@ impl Viewer {
             image_size(picture.size, scale_factor),
             to_core_size(bounds.size),
         );
+        let frame = self
+            .animation
+            .as_ref()
+            .filter(|animation| animation.key == *key)
+            .and_then(|animation| animation.playback.read(cx).image().cloned());
         let large_enough =
             |image: &RenderImage| covers(render_size(image, scale_factor), rect.size);
-        let image = match &self.downscaled {
-            Some((downscaled_key, downscaled))
+        let image = match (&frame, &self.downscaled) {
+            (Some(frame), _) => Some(frame),
+            (None, Some((downscaled_key, downscaled)))
                 if downscaled_key.original() == *key && large_enough(&downscaled.image) =>
             {
                 Some(&downscaled.image)
@@ -552,10 +793,128 @@ impl Viewer {
     }
 }
 
+impl Viewer {
+    /// The bar over the bottom of an animation that plays and pauses it,
+    /// seeks in it and tells the frame shown. A press on it does not reach
+    /// the image, but still focuses the pane.
+    fn render_controls(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        if self.error.is_some() {
+            return None;
+        }
+        let state = self.playback_state(cx)?;
+        let (playing, frame, frame_count) = (
+            state.is_playing(),
+            state.current_frame(),
+            state.frame_count(),
+        );
+        if frame_count < 2 {
+            return None;
+        }
+        let theme = theme(cx);
+        let view = cx.entity();
+        let hover = theme.element_hover;
+        let icon_color = theme.text_strong;
+        let play_button = div()
+            .id("play-pause")
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .justify_center()
+            .size(PLAY_BUTTON_SIZE)
+            .rounded_sm()
+            .hover(move |style| style.bg(hover))
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_playback(cx)))
+            .child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, (), window, _| {
+                        paint_play_icon(playing, icon_color, bounds, window);
+                    },
+                )
+                .flex_shrink_0()
+                .size(PLAY_ICON_SIZE),
+            );
+        let fraction = seek_fraction(frame, frame_count);
+        let seek_bar = div()
+            .w(SEEK_BAR_WIDTH)
+            .min_w(MIN_SEEK_BAR_WIDTH)
+            .h(SEEK_BAR_HEIGHT)
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_seek_bar_down))
+            .child(
+                canvas(
+                    move |bounds, _, cx| {
+                        view.update(cx, |this, _| this.seek_bar = Some(bounds));
+                    },
+                    move |bounds, (), window, _| {
+                        paint_seek_bar(bounds, fraction, &theme, window);
+                    },
+                )
+                .size_full(),
+            );
+        // Wide enough for the largest numbers, so that the bar keeps its
+        // width as they change.
+        #[expect(clippy::cast_precision_loss)]
+        let digits = frame_count.to_string().len() as f32;
+        let counter = div()
+            .flex_shrink_0()
+            .min_w(px(DIGIT_WIDTH * (digits * 2. + 3.)))
+            .text_right()
+            .font_features(FontFeatures(Arc::new(vec![("tnum".into(), 1)])))
+            .child(format!("{} / {frame_count}", frame + 1));
+        let bar = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .max_w_full()
+            .pl_1()
+            .pr_3()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.menu_border)
+            .bg(theme.menu)
+            .shadow_md()
+            .text_xs()
+            .text_color(theme.text_muted)
+            // Keep presses and the wheel from panning, zooming or opening
+            // the menu of the image. Left presses still bubble up (with pan
+            // suppressed on the viewer) so that the pane takes keyboard focus
+            // back from a text field.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| {
+                    if !matches!(this.drag, Some(Drag::Scrub)) {
+                        this.drag = Some(Drag::Controls);
+                    }
+                }),
+            )
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .on_scroll(|_, _, cx| cx.stop_propagation())
+            .child(play_button)
+            .child(seek_bar)
+            .child(counter);
+        // Centered by a box across the viewer that has no listeners, so that
+        // the image can be panned beside the bar.
+        Some(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom_3()
+                .px_3()
+                .flex()
+                .justify_center()
+                .child(bar),
+        )
+    }
+}
+
 impl Render for Viewer {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity();
-        let dragging = self.drag_position.is_some();
+        let dragging = matches!(self.drag, Some(Drag::Pan(_)));
+        let scrubbing = matches!(self.drag, Some(Drag::Scrub));
+        let controls = self.render_controls(cx);
         div()
             .size_full()
             .relative()
@@ -577,7 +936,10 @@ impl Render for Viewer {
                     move |bounds, (), window, cx| {
                         view.update(cx, |this, cx| this.paint(bounds, window, cx));
                         if dragging {
-                            listen_to_drag(&view, window);
+                            follow_drag(&view, window, Viewer::on_drag, Viewer::on_drag_end);
+                        }
+                        if scrubbing {
+                            follow_drag(&view, window, Viewer::on_scrub, Viewer::on_scrub_end);
                         }
                     },
                 )
@@ -596,6 +958,7 @@ impl Render for Viewer {
                         .child(error),
                 )
             })
+            .children(controls)
             .when_some(self.notice.clone(), |this, notice| {
                 this.child(
                     div()
@@ -609,14 +972,20 @@ impl Render for Viewer {
     }
 }
 
-/// Follows the mouse anywhere in the window until the button is released, so
-/// that panning goes on when the cursor leaves the viewer.
-fn listen_to_drag(view: &gpui::Entity<Viewer>, window: &mut Window) {
+/// Follows the mouse anywhere in the window until the left button is
+/// released, so that panning or dragging the seek bar goes on when the cursor
+/// leaves the viewer.
+fn follow_drag(
+    view: &Entity<Viewer>,
+    window: &mut Window,
+    on_move: fn(&mut Viewer, &MouseMoveEvent, &mut Context<Viewer>),
+    on_end: fn(&mut Viewer, &mut Context<Viewer>),
+) {
     window.on_mouse_event({
         let view = view.clone();
         move |event: &MouseMoveEvent, phase, _, cx| {
             if phase == DispatchPhase::Bubble {
-                view.update(cx, |this, cx| this.on_drag(event, cx));
+                view.update(cx, |this, cx| on_move(this, event, cx));
             }
         }
     });
@@ -624,10 +993,57 @@ fn listen_to_drag(view: &gpui::Entity<Viewer>, window: &mut Window) {
         let view = view.clone();
         move |event: &MouseUpEvent, phase, _, cx| {
             if phase == DispatchPhase::Bubble && event.button == MouseButton::Left {
-                view.update(cx, Viewer::on_drag_end);
+                view.update(cx, on_end);
             }
         }
     });
+}
+
+/// Draws a pause icon if `playing`, or else a play icon, in the 12 × 12
+/// `bounds`.
+fn paint_play_icon(playing: bool, color: Rgba, bounds: Bounds<Pixels>, window: &mut Window) {
+    let at = |(x, y): (f32, f32)| bounds.origin + point(px(x), px(y));
+    if playing {
+        for [left, top, right, bottom] in PAUSE_BARS {
+            let bar = Bounds::from_corners(at((left, top)), at((right, bottom)));
+            window.paint_quad(fill(bar, color));
+        }
+        return;
+    }
+    let [first, rest @ ..] = PLAY_TRIANGLE;
+    let mut builder = PathBuilder::fill();
+    builder.move_to(at(first));
+    for corner in rest {
+        builder.line_to(at(corner));
+    }
+    builder.close();
+    match builder.build() {
+        Ok(path) => window.paint_path(path, color),
+        Err(error) => tracing::error!("failed to draw an icon: {error}"),
+    }
+}
+
+/// Draws a seek bar over `bounds`, with its thumb `fraction` of the way
+/// along. The thumb stays within the bounds.
+fn paint_seek_bar(bounds: Bounds<Pixels>, fraction: f32, theme: &Theme, window: &mut Window) {
+    let radius = SEEK_THUMB_SIZE * 0.5;
+    let center_y = bounds.center().y;
+    let start = bounds.left() + radius;
+    let length = (bounds.size.width - SEEK_THUMB_SIZE).max(Pixels::ZERO);
+    let track = Bounds::new(
+        point(start, center_y - SEEK_TRACK_HEIGHT * 0.5),
+        size(length, SEEK_TRACK_HEIGHT),
+    );
+    let rounding = SEEK_TRACK_HEIGHT * 0.5;
+    window.paint_quad(fill(track, theme.menu_border).corner_radii(rounding));
+    let thumb_x = start + length * fraction;
+    let played = Bounds::new(track.origin, size(thumb_x - start, SEEK_TRACK_HEIGHT));
+    window.paint_quad(fill(played, theme.accent).corner_radii(rounding));
+    let thumb = Bounds::centered_at(
+        point(thumb_x, center_y),
+        size(SEEK_THUMB_SIZE, SEEK_THUMB_SIZE),
+    );
+    window.paint_quad(fill(thumb, theme.accent).corner_radii(radius));
 }
 
 /// Draws `image` over `rect`, relative to the viewer `bounds`.
