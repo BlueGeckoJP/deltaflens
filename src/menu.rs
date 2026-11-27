@@ -386,5 +386,6 @@ mod tests {
         assert_eq!(shortcut("ctrl-,"), "Ctrl+,");
         assert_eq!(shortcut("ctrl-tab"), "Ctrl+Tab");
         assert_eq!(shortcut("escape"), "Esc");
+        assert_eq!(shortcut("space"), "Space");
     }
 }

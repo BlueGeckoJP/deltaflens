@@ -2,6 +2,7 @@ mod explorer;
 mod file_actions;
 mod images;
 mod menu;
+mod playback;
 mod render_image;
 mod settings;
 mod settings_view;
@@ -29,7 +30,8 @@ use crate::workspace_view::{
     FocusPaneUp, GoBack, GoForward, GoUp, LayoutExplorerAndViewer, LayoutGrid, LayoutSingle,
     LayoutThreeColumns, LayoutTwoColumns, NewTab, NextImage, Open, OpenSettings, PreviousImage,
     ReopenClosedTab, ResetView, SplitDown, SplitRight, SwapPaneDown, SwapPaneLeft, SwapPaneRight,
-    SwapPaneUp, ToggleDestination, ToggleHorizontalTabs, ToggleVerticalTabs, WorkspaceView,
+    SwapPaneUp, ToggleDestination, ToggleHorizontalTabs, TogglePlayback, ToggleVerticalTabs,
+    WorkspaceView,
 };
 
 actions!(deltaflens, [Quit]);
@@ -68,41 +70,7 @@ fn main() -> Result<()> {
             }
         })
         .detach();
-        cx.bind_keys([
-            KeyBinding::new("ctrl-o", Open, None),
-            KeyBinding::new("ctrl-n", NewTab, None),
-            KeyBinding::new("ctrl-w", CloseTab, None),
-            KeyBinding::new("ctrl-shift-t", ReopenClosedTab, None),
-            KeyBinding::new("ctrl-tab", ActivateNextTab, None),
-            KeyBinding::new("ctrl-shift-tab", ActivatePreviousTab, None),
-            KeyBinding::new("ctrl-q", Quit, None),
-            KeyBinding::new("ctrl-0", ResetView, None),
-            KeyBinding::new("left", PreviousImage, None),
-            KeyBinding::new("right", NextImage, None),
-            KeyBinding::new("alt-left", GoBack, None),
-            KeyBinding::new("alt-right", GoForward, None),
-            KeyBinding::new("alt-up", GoUp, None),
-            KeyBinding::new("ctrl-k right", SplitRight, None),
-            KeyBinding::new("ctrl-k down", SplitDown, None),
-            KeyBinding::new("ctrl-alt-left", FocusPaneLeft, None),
-            KeyBinding::new("ctrl-alt-right", FocusPaneRight, None),
-            KeyBinding::new("ctrl-alt-up", FocusPaneUp, None),
-            KeyBinding::new("ctrl-alt-down", FocusPaneDown, None),
-            KeyBinding::new("ctrl-alt-shift-left", SwapPaneLeft, None),
-            KeyBinding::new("ctrl-alt-shift-right", SwapPaneRight, None),
-            KeyBinding::new("ctrl-alt-shift-up", SwapPaneUp, None),
-            KeyBinding::new("ctrl-alt-shift-down", SwapPaneDown, None),
-            KeyBinding::new("ctrl-k 1", LayoutSingle, None),
-            KeyBinding::new("ctrl-k 2", LayoutTwoColumns, None),
-            KeyBinding::new("ctrl-k 3", LayoutThreeColumns, None),
-            KeyBinding::new("ctrl-k 4", LayoutGrid, None),
-            KeyBinding::new("ctrl-k 5", LayoutExplorerAndViewer, None),
-            KeyBinding::new("ctrl-k a", ToggleDestination, None),
-            KeyBinding::new("ctrl-k v", ToggleVerticalTabs, None),
-            KeyBinding::new("ctrl-k h", ToggleHorizontalTabs, None),
-            KeyBinding::new("ctrl-,", OpenSettings, None),
-        ]);
-        cx.bind_keys(text_input::key_bindings());
+        cx.bind_keys(key_bindings());
 
         let options = WindowOptions {
             titlebar: Some(TitlebarOptions {
@@ -150,6 +118,48 @@ fn main() -> Result<()> {
     });
 
     Ok(())
+}
+
+/// The key bindings of the application. Those of text fields come last, so
+/// that they win over the others while a text field has focus.
+fn key_bindings() -> Vec<KeyBinding> {
+    let mut bindings = vec![
+        KeyBinding::new("ctrl-o", Open, None),
+        KeyBinding::new("ctrl-n", NewTab, None),
+        KeyBinding::new("ctrl-w", CloseTab, None),
+        KeyBinding::new("ctrl-shift-t", ReopenClosedTab, None),
+        KeyBinding::new("ctrl-tab", ActivateNextTab, None),
+        KeyBinding::new("ctrl-shift-tab", ActivatePreviousTab, None),
+        KeyBinding::new("ctrl-q", Quit, None),
+        KeyBinding::new("ctrl-0", ResetView, None),
+        KeyBinding::new("left", PreviousImage, None),
+        KeyBinding::new("right", NextImage, None),
+        KeyBinding::new("alt-left", GoBack, None),
+        KeyBinding::new("alt-right", GoForward, None),
+        KeyBinding::new("alt-up", GoUp, None),
+        KeyBinding::new("ctrl-k right", SplitRight, None),
+        KeyBinding::new("ctrl-k down", SplitDown, None),
+        KeyBinding::new("ctrl-alt-left", FocusPaneLeft, None),
+        KeyBinding::new("ctrl-alt-right", FocusPaneRight, None),
+        KeyBinding::new("ctrl-alt-up", FocusPaneUp, None),
+        KeyBinding::new("ctrl-alt-down", FocusPaneDown, None),
+        KeyBinding::new("ctrl-alt-shift-left", SwapPaneLeft, None),
+        KeyBinding::new("ctrl-alt-shift-right", SwapPaneRight, None),
+        KeyBinding::new("ctrl-alt-shift-up", SwapPaneUp, None),
+        KeyBinding::new("ctrl-alt-shift-down", SwapPaneDown, None),
+        KeyBinding::new("ctrl-k 1", LayoutSingle, None),
+        KeyBinding::new("ctrl-k 2", LayoutTwoColumns, None),
+        KeyBinding::new("ctrl-k 3", LayoutThreeColumns, None),
+        KeyBinding::new("ctrl-k 4", LayoutGrid, None),
+        KeyBinding::new("ctrl-k 5", LayoutExplorerAndViewer, None),
+        KeyBinding::new("ctrl-k a", ToggleDestination, None),
+        KeyBinding::new("ctrl-k v", ToggleVerticalTabs, None),
+        KeyBinding::new("ctrl-k h", ToggleHorizontalTabs, None),
+        KeyBinding::new("ctrl-,", OpenSettings, None),
+        KeyBinding::new("space", TogglePlayback, None),
+    ];
+    bindings.extend(text_input::key_bindings());
+    bindings
 }
 
 /// What this start does.
@@ -243,5 +253,34 @@ mod tests {
     #[test]
     fn positional_path_is_rejected() {
         assert!(Args::try_parse_from(["deltaflens", "a.png"]).is_err());
+    }
+
+    /// The actions that `keystroke` dispatches where the focused element is
+    /// in `contexts`, as gpui matches them.
+    fn bound_to(keystroke: &str, contexts: &[&str]) -> Vec<Box<dyn gpui::Action>> {
+        let keymap = gpui::Keymap::new(key_bindings());
+        let contexts: Vec<_> = contexts
+            .iter()
+            .map(|context| gpui::KeyContext::parse(context).unwrap())
+            .collect();
+        let (bindings, _) =
+            keymap.bindings_for_input(&[gpui::Keystroke::parse(keystroke).unwrap()], &contexts);
+        bindings
+            .iter()
+            .map(|binding| binding.action().boxed_clone())
+            .collect()
+    }
+
+    #[test]
+    fn space_toggles_playback() {
+        let actions = bound_to("space", &[]);
+        assert_eq!(actions.len(), 1);
+        assert!(actions[0].partial_eq(&TogglePlayback));
+    }
+
+    #[test]
+    fn space_is_typed_in_text_fields() {
+        // No action, so that the text field gets the character.
+        assert!(bound_to("space", &["TextInput"]).is_empty());
     }
 }

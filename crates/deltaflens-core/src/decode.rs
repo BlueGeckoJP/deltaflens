@@ -1,3 +1,4 @@
+mod animation;
 mod color;
 mod encode;
 mod jxl;
@@ -6,10 +7,13 @@ mod thumbnail;
 use std::path::Path;
 
 use eyre::{Result, WrapErr};
-use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
+use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits, RgbaImage};
 
 use self::color::{convert_to_srgb, describes_srgb};
-pub use self::thumbnail::thumbnail;
+pub use self::{
+    animation::{AnimationInfo, DecodedFrame, FrameSource, LoopCount, open_animation},
+    thumbnail::thumbnail,
+};
 pub(crate) use self::{encode::encode_png, thumbnail::fit_within};
 
 /// The most memory the pixels of a decoded image may take: 4 GiB, a
@@ -101,10 +105,14 @@ fn decode_inner(path: &Path) -> Result<DecodedImage> {
     });
     let mut image = DynamicImage::from_decoder(decoder)?;
     image.apply_orientation(orientation);
+    Ok(rgba_to_image(image.into_rgba8(), icc.as_deref(), path))
+}
 
-    let mut buffer = image.into_rgba8();
+/// Converts RGBA pixels to BGRA in sRGB, from the color space of the `icc`
+/// profile if there is one.
+fn rgba_to_image(mut buffer: RgbaImage, icc: Option<&[u8]>, path: &Path) -> DecodedImage {
     if let Some(icc) = icc
-        && let Err(error) = convert_to_srgb(&mut buffer, &icc)
+        && let Err(error) = convert_to_srgb(&mut buffer, icc)
     {
         tracing::warn!(
             "{}: colors are not converted to sRGB: {error:#}",
@@ -114,11 +122,11 @@ fn decode_inner(path: &Path) -> Result<DecodedImage> {
     for pixel in buffer.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
-    Ok(DecodedImage {
+    DecodedImage {
         width: buffer.width(),
         height: buffer.height(),
         pixels: buffer.into_raw(),
-    })
+    }
 }
 
 /// Returns whether the extension of `path` (case-insensitive) belongs to a
@@ -264,7 +272,8 @@ mod tests {
     #[test]
     fn supported_extensions() {
         for name in [
-            "a.png", "a.jpg", "a.JPG", "a.Jpeg", "a.webp", "a.gif", "a.jxl", "a.JXL",
+            "a.png", "a.jpg", "a.JPG", "a.Jpeg", "a.webp", "a.gif", "a.jxl", "a.JXL", "a.apng",
+            "a.APNG",
         ] {
             assert!(is_supported_image(Path::new(name)), "{name}");
         }
