@@ -142,8 +142,7 @@ std::fs::write("red-3x2.avif", encoded.avif_file).unwrap();
 
 Each animated fixture is 4 x 2. The `anim-rgb` ones show red, green and blue
 for 100, 200 and 300 ms and loop forever. The `anim-loop2` ones are played
-twice and hold delays too short to be meant. `red-3x2.gif` has a single
-frame.
+twice and hold short delays, down to 0. `red-3x2.gif` has a single frame.
 
 The GIF and WebP files are made with ImageMagick 7. Its `-loop 2` writes a
 GIF repeat count of 1, that is, two plays:

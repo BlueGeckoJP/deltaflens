@@ -24,6 +24,7 @@ const OPEN_COMMAND: &str = "open_command";
 const THEME: &str = "theme";
 const VERTICAL_TABS: &str = "vertical_tabs";
 const HORIZONTAL_TABS: &str = "horizontal_tabs";
+const CLAMP_SHORT_ANIMATION_DELAYS: &str = "clamp_short_animation_delays";
 
 /// Which colors the application uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -100,6 +101,9 @@ pub struct Settings {
     pub vertical_tabs: VerticalTabs,
     /// Whether each pane has a tab bar at its top.
     pub horizontal_tabs: bool,
+    /// Whether frames of animations with delays too short to be meant are
+    /// shown for 100 ms, as browsers do.
+    pub clamp_short_animation_delays: bool,
 }
 
 impl Default for Settings {
@@ -112,6 +116,7 @@ impl Default for Settings {
             theme: ThemeChoice::default(),
             vertical_tabs: VerticalTabs::default(),
             horizontal_tabs: true,
+            clamp_short_animation_delays: true,
         }
     }
 }
@@ -185,6 +190,10 @@ impl Settings {
                         .and_then(Value::as_bool)
                         .map(|shown| settings.horizontal_tabs = shown)
                         .ok_or_else(|| "true or false".to_owned()),
+                    CLAMP_SHORT_ANIMATION_DELAYS => value
+                        .and_then(Value::as_bool)
+                        .map(|clamp| settings.clamp_short_animation_delays = clamp)
+                        .ok_or_else(|| "true or false".to_owned()),
                     _ => {
                         errors.push(format!("Unknown setting \"{key}\"."));
                         continue;
@@ -239,6 +248,13 @@ impl Settings {
         }
         if current.horizontal_tabs != self.horizontal_tabs {
             set(&mut document, HORIZONTAL_TABS, self.horizontal_tabs);
+        }
+        if current.clamp_short_animation_delays != self.clamp_short_animation_delays {
+            set(
+                &mut document,
+                CLAMP_SHORT_ANIMATION_DELAYS,
+                self.clamp_short_animation_delays,
+            );
         }
         Ok(document.to_string())
     }
@@ -310,7 +326,8 @@ mod tests {
              open_command = \"gimp <path>\"\n\
              theme = \"light\"\n\
              vertical_tabs = \"rail\"\n\
-             horizontal_tabs = false\n",
+             horizontal_tabs = false\n\
+             clamp_short_animation_delays = false\n",
         );
         assert_eq!(
             settings,
@@ -322,6 +339,7 @@ mod tests {
                 theme: ThemeChoice::Light,
                 vertical_tabs: VerticalTabs::Rail,
                 horizontal_tabs: false,
+                clamp_short_animation_delays: false,
             }
         );
         assert_eq!(errors, Vec::<String>::new());
@@ -409,6 +427,34 @@ mod tests {
     }
 
     #[test]
+    fn bad_clamp_short_animation_delays_keeps_clamping() {
+        let (settings, errors) = Settings::parse("clamp_short_animation_delays = 1\n");
+        assert!(settings.clamp_short_animation_delays);
+        assert_eq!(
+            errors,
+            ["\"clamp_short_animation_delays\" must be true or false. The default is used."]
+        );
+    }
+
+    #[test]
+    fn not_clamping_short_animation_delays_is_written() {
+        let settings = Settings {
+            clamp_short_animation_delays: false,
+            ..Settings::default()
+        };
+        assert_eq!(
+            settings.merge_into("").unwrap(),
+            "clamp_short_animation_delays = false\n"
+        );
+        // Back to the default, it is written too, as the file had it.
+        let text = "clamp_short_animation_delays = false\n";
+        assert_eq!(
+            Settings::default().merge_into(text).unwrap(),
+            "clamp_short_animation_delays = true\n"
+        );
+    }
+
+    #[test]
     fn unknown_setting_is_an_error_but_not_fatal() {
         let (settings, errors) = Settings::parse("colour = \"red\"\nthumbnail_size = 96\n");
         assert_eq!(settings.thumbnail_size, 96);
@@ -453,6 +499,7 @@ mod tests {
         let path = dir.path().join("deltaflens/config.toml");
         let settings = Settings {
             open_command: "viewer --file=<path>".to_owned(),
+            clamp_short_animation_delays: false,
             ..Settings::default()
         };
         settings.save(&path).unwrap();

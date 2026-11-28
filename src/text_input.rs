@@ -1,5 +1,5 @@
 //! A single-line text field. Based on `examples/input.rs` of gpui
-//! (Apache-2.0), with a submit event added.
+//! (Apache-2.0), with events for Enter and the loss of focus added.
 
 use std::ops::Range;
 
@@ -33,6 +33,7 @@ actions!(
         Cut,
         Copy,
         Submit,
+        Cancel,
     ]
 );
 
@@ -52,13 +53,22 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-c", Copy, Some(CONTEXT)),
         KeyBinding::new("ctrl-x", Cut, Some(CONTEXT)),
         KeyBinding::new("enter", Submit, Some(CONTEXT)),
-        // Typed, instead of playing or pausing an animation.
+        KeyBinding::new("escape", Cancel, Some(CONTEXT)),
+        // Typed, instead of playing or pausing an animation or changing its
+        // speed.
         KeyBinding::new("space", NoAction, Some(CONTEXT)),
+        KeyBinding::new("[", NoAction, Some(CONTEXT)),
+        KeyBinding::new("]", NoAction, Some(CONTEXT)),
     ]
 }
 
-/// Emitted with the text when Enter is pressed or the field loses focus.
-pub struct Submitted(pub SharedString);
+/// What a text field tells, with its text.
+pub enum TextInputEvent {
+    /// Enter was pressed.
+    Submitted(SharedString),
+    /// The field lost focus, such as by a press elsewhere or Escape.
+    Blurred(SharedString),
+}
 
 pub struct TextInput {
     focus_handle: FocusHandle,
@@ -71,13 +81,13 @@ pub struct TextInput {
     is_selecting: bool,
 }
 
-impl EventEmitter<Submitted> for TextInput {}
+impl EventEmitter<TextInputEvent> for TextInput {}
 
 impl TextInput {
     pub fn new(content: SharedString, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         cx.on_blur(&focus_handle, window, |this, _, cx| {
-            this.submit(&Submit, cx);
+            cx.emit(TextInputEvent::Blurred(this.content.clone()));
         })
         .detach();
         Self {
@@ -94,7 +104,15 @@ impl TextInput {
 
     /// Replaces the text, unless the field is being edited.
     pub fn set_text(&mut self, text: SharedString, window: &Window, cx: &mut Context<Self>) {
-        if self.focus_handle.is_focused(window) || self.content == text {
+        if !self.focus_handle.is_focused(window) {
+            self.reset_text(text, cx);
+        }
+    }
+
+    /// Replaces the text even while the field is being edited, dropping what
+    /// was typed.
+    pub fn reset_text(&mut self, text: SharedString, cx: &mut Context<Self>) {
+        if self.content == text {
             return;
         }
         self.selected_range = text.len()..text.len();
@@ -105,7 +123,7 @@ impl TextInput {
     }
 
     fn submit(&mut self, _: &Submit, cx: &mut Context<Self>) {
-        cx.emit(Submitted(self.content.clone()));
+        cx.emit(TextInputEvent::Submitted(self.content.clone()));
     }
 
     fn left(&mut self, _: &Left, window: &mut Window, cx: &mut Context<Self>) {
@@ -676,11 +694,14 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(|this, action, _, cx| this.submit(action, cx)))
+            // Gives up the focus, which the view around the field then takes.
+            .on_action(|_: &Cancel, window, cx| window.blur(cx))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .w_full()
+            .overflow_hidden()
             .px_2()
             .py_1()
             .rounded_sm()

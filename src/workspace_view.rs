@@ -64,6 +64,9 @@ actions!(
         ToggleVerticalTabs,
         ToggleHorizontalTabs,
         TogglePlayback,
+        DecreasePlaybackSpeed,
+        IncreasePlaybackSpeed,
+        ResetPlaybackSpeed,
     ]
 );
 
@@ -410,7 +413,9 @@ impl WorkspaceView {
                 let images = self.images.clone();
                 let settings = &self.settings;
                 let context_menu = self.context_menu.clone();
-                TabView::Viewer(cx.new(|cx| Viewer::new(path, images, settings, context_menu, cx)))
+                TabView::Viewer(
+                    cx.new(|cx| Viewer::new(path, images, settings, context_menu, window, cx)),
+                )
             }
             TabContent::Settings => {
                 let settings = self.settings.clone();
@@ -545,6 +550,39 @@ impl WorkspaceView {
     fn toggle_playback(&mut self, _: &TogglePlayback, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(viewer) = self.active_viewer() {
             viewer.update(cx, Viewer::toggle_playback);
+        }
+    }
+
+    fn decrease_playback_speed(
+        &mut self,
+        _: &DecreasePlaybackSpeed,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(viewer) = self.active_viewer() {
+            viewer.update(cx, Viewer::decrease_speed);
+        }
+    }
+
+    fn increase_playback_speed(
+        &mut self,
+        _: &IncreasePlaybackSpeed,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(viewer) = self.active_viewer() {
+            viewer.update(cx, Viewer::increase_speed);
+        }
+    }
+
+    fn reset_playback_speed(
+        &mut self,
+        _: &ResetPlaybackSpeed,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(viewer) = self.active_viewer() {
+            viewer.update(cx, Viewer::reset_speed);
         }
     }
 
@@ -1962,6 +2000,9 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::activate_previous_tab))
             .on_action(cx.listener(Self::reset_view))
             .on_action(cx.listener(Self::toggle_playback))
+            .on_action(cx.listener(Self::decrease_playback_speed))
+            .on_action(cx.listener(Self::increase_playback_speed))
+            .on_action(cx.listener(Self::reset_playback_speed))
             .on_action(cx.listener(Self::previous_image))
             .on_action(cx.listener(Self::next_image))
             .on_action(cx.listener(Self::go_back))

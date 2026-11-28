@@ -3,7 +3,7 @@ use gpui::{AnyElement, Context, Entity, SharedString, Window, div, prelude::*, p
 
 use crate::{
     settings::SettingsStore,
-    text_input::{Submitted, TextInput},
+    text_input::{TextInput, TextInputEvent},
     theme::{Theme, theme},
 };
 
@@ -24,7 +24,9 @@ impl SettingsView {
     ) -> Self {
         let command: SharedString = settings.read(cx).settings().open_command.clone().into();
         let open_command = cx.new(|cx| TextInput::new(command, window, cx));
-        cx.subscribe(&open_command, |this, _, Submitted(text), cx| {
+        // Entered, or left by moving elsewhere.
+        cx.subscribe(&open_command, |this, _, event, cx| {
+            let (TextInputEvent::Submitted(text) | TextInputEvent::Blurred(text)) = event;
             let text = text.trim().to_owned();
             if text.is_empty() {
                 return;
@@ -167,6 +169,7 @@ impl Render for SettingsView {
         let image_cache_mib = settings.image_cache_mib;
         let show_hidden = settings.show_hidden_files;
         let horizontal_tabs = settings.horizontal_tabs;
+        let clamp_short_delays = settings.clamp_short_animation_delays;
         let theme = theme(cx);
         div()
             .id("settings")
@@ -227,6 +230,19 @@ impl Render for SettingsView {
                 ),
             ))
             .child(Self::render_image_cache(image_cache_mib, &theme, cx))
+            .child(row(
+                "Clamp short animation delays",
+                button(
+                    "clamp-short-delays",
+                    if clamp_short_delays { "On" } else { "Off" },
+                    true,
+                    false,
+                    &theme,
+                    cx.listener(move |this, _, _, cx| {
+                        this.change(|s| s.clamp_short_animation_delays = !clamp_short_delays, cx);
+                    }),
+                ),
+            ))
             .child(row(
                 "Open with (<path> is the file; Enter to apply)",
                 div().w(px(320.)).child(self.open_command.clone()),

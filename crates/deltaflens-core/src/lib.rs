@@ -39,7 +39,10 @@ pub use id::{PaneId, TabId};
 pub use layout::{Axis, DropZone, Layout, Side, drop_zone};
 pub use lru::LruCache;
 pub use pane::Pane;
-pub use playback::{Advance, PlaybackState, PlaybackStatus};
+pub use playback::{
+    Advance, DEFAULT_PLAYBACK_SPEED, PlaybackState, PlaybackStatus, effective_delay, format_speed,
+    parse_speed, scale_delay,
+};
 pub use preset::Preset;
 pub use session::Session;
 pub use settings::{IMAGE_CACHE_MIBS, Settings, THUMBNAIL_SIZES, ThemeChoice, VerticalTabs};

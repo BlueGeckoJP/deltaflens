@@ -1,7 +1,83 @@
-//! The state of playing an animation: which frame is shown, and whether it
-//! plays. It knows nothing of how frames are decoded or when they are due.
+//! The state of playing an animation: which frame is shown, whether it plays,
+//! and how fast. It knows nothing of how frames are decoded or when they are
+//! due.
+
+use std::{ops::RangeInclusive, time::Duration};
 
 use crate::LoopCount;
+
+/// The speed an animation plays at first, as the file records it.
+pub const DEFAULT_PLAYBACK_SPEED: f32 = 1.0;
+
+/// The speeds that stepping the speed down and up goes through.
+const PLAYBACK_SPEED_PRESETS: [f32; 6] = [0.25, 0.5, 1.0, 1.5, 2.0, 3.0];
+
+/// The speeds an animation can play at.
+const PLAYBACK_SPEED_RANGE: RangeInclusive<f32> = 0.05..=16.0;
+
+/// Reads a speed typed by the user, such as `1.5` or `2x`, with spaces around
+/// it. Returns `None` unless it is a number in the range speeds can be, from
+/// 0.05 to 16.
+#[must_use]
+pub fn parse_speed(text: &str) -> Option<f32> {
+    let text = text.trim();
+    let number = text.strip_suffix(['x', 'X']).unwrap_or(text).trim_end();
+    // Not a number and the infinities are out of range too.
+    let speed = number.parse().ok()?;
+    PLAYBACK_SPEED_RANGE.contains(&speed).then_some(speed)
+}
+
+/// Shows a speed as briefly as [`parse_speed`] reads it back the same, without
+/// trailing zeros: `1`, `0.25`, `1.5`. Speeds are only set from the presets or
+/// from such text, so no rounding is needed.
+#[must_use]
+pub fn format_speed(speed: f32) -> String {
+    speed.to_string()
+}
+
+/// What a delay too short to be meant becomes, as in browsers. This keeps
+/// such animations from running at full speed.
+const DEFAULT_SHORT_DELAY: Duration = Duration::from_millis(100);
+
+/// How long a frame of `delay` is shown at the speed the file records. If
+/// `clamp`, a delay no longer than `too_short`, the
+/// [`too_short_delay`](crate::AnimationInfo::too_short_delay) of the
+/// animation, becomes 100 ms as in browsers; otherwise it stays as it is.
+/// The speed divides the delay this gives.
+#[must_use]
+pub fn effective_delay(delay: Duration, too_short: Duration, clamp: bool) -> Duration {
+    if clamp && delay <= too_short {
+        DEFAULT_SHORT_DELAY
+    } else {
+        delay
+    }
+}
+
+/// How long a frame of `delay` is shown at `speed`: a delay of 0 stays 0, and
+/// one too long to hold becomes [`Duration::MAX`].
+#[must_use]
+pub fn scale_delay(delay: Duration, speed: f32) -> Duration {
+    if delay.is_zero() {
+        return Duration::ZERO;
+    }
+    Duration::try_from_secs_f64(delay.as_secs_f64() / f64::from(speed)).unwrap_or(Duration::MAX)
+}
+
+/// The fastest preset slower than `speed`. Speeds are compared exactly, as
+/// they are never computed.
+fn slower_preset(speed: f32) -> Option<f32> {
+    PLAYBACK_SPEED_PRESETS
+        .into_iter()
+        .rev()
+        .find(|&preset| preset < speed)
+}
+
+/// The slowest preset faster than `speed`.
+fn faster_preset(speed: f32) -> Option<f32> {
+    PLAYBACK_SPEED_PRESETS
+        .into_iter()
+        .find(|&preset| preset > speed)
+}
 
 /// Whether an animation plays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,9 +101,9 @@ pub enum Advance {
     Finished,
 }
 
-/// Which frame of an animation is shown, whether it plays, and how many
-/// times it has been played.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Which frame of an animation is shown, whether it plays, how many times it
+/// has been played, and how fast.
+#[derive(Debug, Clone, PartialEq)]
 pub struct PlaybackState {
     /// At least 1.
     frame_count: usize,
@@ -38,6 +114,9 @@ pub struct PlaybackState {
     status: PlaybackStatus,
     /// While the seek bar is dragged, whether to play when it is let go.
     resume_after_scrub: Option<bool>,
+    /// The delays of the frames are divided by this. Within
+    /// [`PLAYBACK_SPEED_RANGE`].
+    speed: f32,
 }
 
 impl PlaybackState {
@@ -52,6 +131,7 @@ impl PlaybackState {
             completed_loops: 0,
             status: PlaybackStatus::Playing,
             resume_after_scrub: None,
+            speed: DEFAULT_PLAYBACK_SPEED,
         }
     }
 
@@ -203,6 +283,66 @@ impl PlaybackState {
                 PlaybackStatus::Paused
             };
         }
+    }
+
+    /// How fast the animation plays, as a multiple of the speed its delays
+    /// give: 2 shows each frame for half its delay.
+    #[must_use]
+    pub fn speed(&self) -> f32 {
+        self.speed
+    }
+
+    /// Plays at `speed` if it is from 0.05 to 16. Returns whether it is, as
+    /// otherwise the speed stays.
+    pub fn set_speed(&mut self, speed: f32) -> bool {
+        let valid = PLAYBACK_SPEED_RANGE.contains(&speed);
+        if valid {
+            self.speed = speed;
+        }
+        valid
+    }
+
+    /// Plays at the speed the file records.
+    pub fn reset_speed(&mut self) {
+        self.speed = DEFAULT_PLAYBACK_SPEED;
+    }
+
+    /// Plays at the fastest preset slower than the current speed: 0.25, 0.5,
+    /// 1, 1.5, 2 or 3. Returns whether there is one.
+    pub fn decrease_speed(&mut self) -> bool {
+        let Some(speed) = slower_preset(self.speed) else {
+            return false;
+        };
+        self.speed = speed;
+        true
+    }
+
+    /// Plays at the slowest preset faster than the current speed. Returns
+    /// whether there is one.
+    pub fn increase_speed(&mut self) -> bool {
+        let Some(speed) = faster_preset(self.speed) else {
+            return false;
+        };
+        self.speed = speed;
+        true
+    }
+
+    /// Whether [`decrease_speed`](Self::decrease_speed) changes the speed.
+    #[must_use]
+    pub fn can_decrease_speed(&self) -> bool {
+        slower_preset(self.speed).is_some()
+    }
+
+    /// Whether [`increase_speed`](Self::increase_speed) changes the speed.
+    #[must_use]
+    pub fn can_increase_speed(&self) -> bool {
+        faster_preset(self.speed).is_some()
+    }
+
+    /// How long a frame of `delay` is shown at the current speed.
+    #[must_use]
+    pub fn scaled_delay(&self, delay: Duration) -> Duration {
+        scale_delay(delay, self.speed)
     }
 }
 
@@ -525,6 +665,271 @@ mod tests {
         let mut state = finished(3);
         assert!(state.toggle_play_pause());
         assert_eq!(state.wraps_left(), Some(2));
+    }
+
+    #[track_caller]
+    fn assert_speed(state: &PlaybackState, expected: f32) {
+        let speed = state.speed();
+        assert!(
+            (speed - expected).abs() < f32::EPSILON,
+            "{speed} is not {expected}"
+        );
+    }
+
+    /// A state that plays at `speed`.
+    fn at_speed(speed: f32) -> PlaybackState {
+        let mut state = PlaybackState::new(3, LoopCount::Infinite);
+        assert!(state.set_speed(speed), "{speed}");
+        state
+    }
+
+    fn ms(millis: u64) -> Duration {
+        Duration::from_millis(millis)
+    }
+
+    #[test]
+    fn plays_at_the_recorded_speed_at_first() {
+        let state = PlaybackState::new(3, LoopCount::Infinite);
+        assert_speed(&state, 1.0);
+        assert_eq!(state.scaled_delay(ms(100)), ms(100));
+    }
+
+    #[test]
+    fn set_speed_takes_speeds_in_range() {
+        let mut state = PlaybackState::new(3, LoopCount::Infinite);
+        for speed in [0.05, 0.125, 1.2, 16.0] {
+            assert!(state.set_speed(speed), "{speed}");
+            assert_speed(&state, speed);
+        }
+    }
+
+    #[test]
+    fn set_speed_keeps_the_speed_for_others() {
+        let mut state = at_speed(2.0);
+        for speed in [
+            0.0,
+            -0.0,
+            -1.0,
+            0.049,
+            16.01,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ] {
+            assert!(!state.set_speed(speed), "{speed}");
+            assert_speed(&state, 2.0);
+        }
+    }
+
+    #[test]
+    fn reset_speed_goes_back_to_the_recorded_speed() {
+        let mut state = at_speed(0.3);
+        state.reset_speed();
+        assert_speed(&state, 1.0);
+    }
+
+    #[test]
+    fn decrease_steps_down_through_the_presets() {
+        let mut state = at_speed(3.0);
+        for expected in [2.0, 1.5, 1.0, 0.5, 0.25] {
+            assert!(state.can_decrease_speed());
+            assert!(state.decrease_speed());
+            assert_speed(&state, expected);
+        }
+        assert!(!state.can_decrease_speed());
+        assert!(!state.decrease_speed());
+        assert_speed(&state, 0.25);
+    }
+
+    #[test]
+    fn increase_steps_up_through_the_presets() {
+        let mut state = at_speed(0.25);
+        for expected in [0.5, 1.0, 1.5, 2.0, 3.0] {
+            assert!(state.can_increase_speed());
+            assert!(state.increase_speed());
+            assert_speed(&state, expected);
+        }
+        assert!(!state.can_increase_speed());
+        assert!(!state.increase_speed());
+        assert_speed(&state, 3.0);
+    }
+
+    #[test]
+    fn steps_from_a_speed_between_presets_to_the_nearest() {
+        let mut state = at_speed(1.2);
+        assert!(state.decrease_speed());
+        assert_speed(&state, 1.0);
+
+        let mut state = at_speed(1.2);
+        assert!(state.increase_speed());
+        assert_speed(&state, 1.5);
+    }
+
+    #[test]
+    fn steps_from_beyond_the_presets_toward_them() {
+        let mut state = at_speed(0.1);
+        assert!(!state.can_decrease_speed());
+        assert!(!state.decrease_speed());
+        assert_speed(&state, 0.1);
+        assert!(state.increase_speed());
+        assert_speed(&state, 0.25);
+
+        let mut state = at_speed(16.0);
+        assert!(!state.can_increase_speed());
+        assert!(!state.increase_speed());
+        assert_speed(&state, 16.0);
+        assert!(state.decrease_speed());
+        assert_speed(&state, 3.0);
+    }
+
+    #[test]
+    fn speed_stays_through_plays_seeks_and_scrubs() {
+        let mut state = PlaybackState::new(3, finite(1));
+        assert!(state.set_speed(2.0));
+        while state.advance() != Advance::Finished {}
+        assert!(state.toggle_play_pause());
+        state.seek(2);
+        state.begin_scrub();
+        state.scrub_to(1);
+        state.end_scrub();
+        assert_speed(&state, 2.0);
+    }
+
+    #[test]
+    fn delays_are_divided_by_the_speed() {
+        assert_eq!(at_speed(2.0).scaled_delay(ms(100)), ms(50));
+        assert_eq!(at_speed(0.5).scaled_delay(ms(100)), ms(200));
+        assert_eq!(at_speed(0.25).scaled_delay(ms(100)), ms(400));
+        assert_eq!(scale_delay(ms(10), 3.0), Duration::from_nanos(3_333_333));
+        assert_eq!(scale_delay(ms(250), 1.0), ms(250));
+    }
+
+    #[test]
+    fn delay_of_0_stays_0_at_any_speed() {
+        for speed in [0.05, 1.0, 16.0] {
+            assert_eq!(scale_delay(Duration::ZERO, speed), Duration::ZERO);
+        }
+    }
+
+    #[test]
+    fn delays_too_long_to_hold_saturate() {
+        assert_eq!(scale_delay(Duration::MAX, 0.05), Duration::MAX);
+        assert_eq!(scale_delay(Duration::MAX, 0.5), Duration::MAX);
+        assert_eq!(
+            scale_delay(Duration::from_secs(u64::MAX / 2), 0.25),
+            Duration::MAX
+        );
+    }
+
+    const GIF_TOO_SHORT: Duration = Duration::from_millis(10);
+
+    #[test]
+    fn gif_delays_up_to_10_ms_are_clamped() {
+        for (delay, expected) in [(0, 100), (10, 100), (11, 11), (20, 20)] {
+            assert_eq!(
+                effective_delay(ms(delay), GIF_TOO_SHORT, true),
+                ms(expected),
+                "{delay}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_delays_of_0_are_clamped() {
+        for (delay, expected) in [(0, 100), (1, 1), (10, 10)] {
+            assert_eq!(
+                effective_delay(ms(delay), Duration::ZERO, true),
+                ms(expected),
+                "{delay}"
+            );
+        }
+    }
+
+    #[test]
+    fn delays_stay_as_they_are_without_clamping() {
+        for too_short in [GIF_TOO_SHORT, Duration::ZERO] {
+            for delay in [0, 1, 10, 11, 20] {
+                assert_eq!(
+                    effective_delay(ms(delay), too_short, false),
+                    ms(delay),
+                    "{delay}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clamped_delays_are_divided_by_the_speed() {
+        let state = at_speed(2.0);
+        let shown = |delay, too_short, clamp| {
+            state.scaled_delay(effective_delay(ms(delay), too_short, clamp))
+        };
+        assert_eq!(shown(0, GIF_TOO_SHORT, true), ms(50));
+        assert_eq!(shown(10, GIF_TOO_SHORT, true), ms(50));
+        assert_eq!(shown(0, Duration::ZERO, true), ms(50));
+        assert_eq!(shown(0, GIF_TOO_SHORT, false), Duration::ZERO);
+        assert_eq!(shown(10, GIF_TOO_SHORT, false), ms(5));
+        assert_eq!(shown(20, GIF_TOO_SHORT, true), ms(10));
+        assert_eq!(
+            at_speed(0.5).scaled_delay(effective_delay(ms(0), GIF_TOO_SHORT, true)),
+            ms(200)
+        );
+    }
+
+    #[test]
+    fn parses_speeds_with_spaces_and_an_x() {
+        for (text, expected) in [
+            ("1", 1.0),
+            ("1.5", 1.5),
+            ("  0.25 ", 0.25),
+            ("2x", 2.0),
+            ("2X", 2.0),
+            ("0.5 x", 0.5),
+            (" 3x  ", 3.0),
+            (".5", 0.5),
+            ("0.05", 0.05),
+            ("16", 16.0),
+            ("1.2", 1.2),
+        ] {
+            assert_eq!(parse_speed(text), Some(expected), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_text_that_is_not_a_speed() {
+        for text in [
+            "", " ", "x", "abc", "0", "-1", "0.049", "16.01", "NaN", "inf", "-inf", "1.5xx", "x2",
+            "1,5", "1.5 2",
+        ] {
+            assert_eq!(parse_speed(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn formats_speeds_without_trailing_zeros() {
+        for (speed, expected) in [
+            (1.0, "1"),
+            (0.25, "0.25"),
+            (1.5, "1.5"),
+            (1.25, "1.25"),
+            (0.05, "0.05"),
+            (0.125, "0.125"),
+            (1.2, "1.2"),
+            (3.0, "3"),
+            (16.0, "16"),
+        ] {
+            assert_eq!(format_speed(speed), expected);
+        }
+    }
+
+    #[test]
+    fn formatted_speeds_parse_back_the_same() {
+        for speed in PLAYBACK_SPEED_PRESETS
+            .into_iter()
+            .chain([0.05, 0.125, 1.2, 0.33, 16.0])
+        {
+            assert_eq!(parse_speed(&format_speed(speed)), Some(speed), "{speed}");
+        }
     }
 
     #[test]

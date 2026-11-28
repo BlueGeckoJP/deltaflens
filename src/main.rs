@@ -26,12 +26,12 @@ use gpui::{
 use tracing_subscriber::EnvFilter;
 
 use crate::workspace_view::{
-    ActivateNextTab, ActivatePreviousTab, CloseTab, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
-    FocusPaneUp, GoBack, GoForward, GoUp, LayoutExplorerAndViewer, LayoutGrid, LayoutSingle,
-    LayoutThreeColumns, LayoutTwoColumns, NewTab, NextImage, Open, OpenSettings, PreviousImage,
-    ReopenClosedTab, ResetView, SplitDown, SplitRight, SwapPaneDown, SwapPaneLeft, SwapPaneRight,
-    SwapPaneUp, ToggleDestination, ToggleHorizontalTabs, TogglePlayback, ToggleVerticalTabs,
-    WorkspaceView,
+    ActivateNextTab, ActivatePreviousTab, CloseTab, DecreasePlaybackSpeed, FocusPaneDown,
+    FocusPaneLeft, FocusPaneRight, FocusPaneUp, GoBack, GoForward, GoUp, IncreasePlaybackSpeed,
+    LayoutExplorerAndViewer, LayoutGrid, LayoutSingle, LayoutThreeColumns, LayoutTwoColumns,
+    NewTab, NextImage, Open, OpenSettings, PreviousImage, ReopenClosedTab, ResetPlaybackSpeed,
+    ResetView, SplitDown, SplitRight, SwapPaneDown, SwapPaneLeft, SwapPaneRight, SwapPaneUp,
+    ToggleDestination, ToggleHorizontalTabs, TogglePlayback, ToggleVerticalTabs, WorkspaceView,
 };
 
 actions!(deltaflens, [Quit]);
@@ -157,6 +157,9 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-k h", ToggleHorizontalTabs, None),
         KeyBinding::new("ctrl-,", OpenSettings, None),
         KeyBinding::new("space", TogglePlayback, None),
+        KeyBinding::new("[", DecreasePlaybackSpeed, None),
+        KeyBinding::new("]", IncreasePlaybackSpeed, None),
+        KeyBinding::new("backspace", ResetPlaybackSpeed, None),
     ];
     bindings.extend(text_input::key_bindings());
     bindings
@@ -282,5 +285,34 @@ mod tests {
     fn space_is_typed_in_text_fields() {
         // No action, so that the text field gets the character.
         assert!(bound_to("space", &["TextInput"]).is_empty());
+    }
+
+    #[test]
+    fn brackets_and_backspace_change_the_playback_speed() {
+        let decrease = bound_to("[", &[]);
+        assert_eq!(decrease.len(), 1);
+        assert!(decrease[0].partial_eq(&DecreasePlaybackSpeed));
+        let increase = bound_to("]", &[]);
+        assert_eq!(increase.len(), 1);
+        assert!(increase[0].partial_eq(&IncreasePlaybackSpeed));
+        let reset = bound_to("backspace", &[]);
+        assert_eq!(reset.len(), 1);
+        assert!(reset[0].partial_eq(&ResetPlaybackSpeed));
+    }
+
+    #[test]
+    fn brackets_are_typed_in_text_fields() {
+        assert!(bound_to("[", &["TextInput"]).is_empty());
+        assert!(bound_to("]", &["TextInput"]).is_empty());
+    }
+
+    #[test]
+    fn backspace_and_escape_edit_text_fields() {
+        // The first is the one dispatched.
+        let backspace = bound_to("backspace", &["TextInput"]);
+        assert!(backspace[0].partial_eq(&text_input::Backspace));
+        let escape = bound_to("escape", &["TextInput"]);
+        assert_eq!(escape.len(), 1);
+        assert!(escape[0].partial_eq(&text_input::Cancel));
     }
 }

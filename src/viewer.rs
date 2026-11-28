@@ -5,8 +5,8 @@ use std::{
 };
 
 use deltaflens_core::{
-    Direction, PlaybackState, Rect, ViewTransform, downscaled_size, list_images, neighbor_image,
-    prefetch_images, visible_tiles,
+    DEFAULT_PLAYBACK_SPEED, Direction, PlaybackState, Rect, ViewTransform, downscaled_size,
+    format_speed, list_images, neighbor_image, parse_speed, prefetch_images, visible_tiles,
 };
 use gpui::{
     App, Bounds, ClickEvent, Context, CursorStyle, DispatchPhase, Entity, FontFeatures,
@@ -21,6 +21,7 @@ use crate::{
     menu::{ContextMenu, Menu},
     playback::{NotAnimated, Playback, Resume, frame_at, seek_fraction},
     settings::SettingsStore,
+    text_input::{TextInput, TextInputEvent},
     theme::{Theme, theme},
     workspace_view::{NextImage, PreviousImage, ResetView, SplitDown, SplitRight, TogglePlayback},
 };
@@ -57,6 +58,10 @@ const SEEK_THUMB_SIZE: Pixels = px(10.);
 /// About the width of a digit of the frame numbers, to keep their room the
 /// same as they change.
 const DIGIT_WIDTH: f32 = 7.;
+/// The width of the field of the playback speed, enough for `0.125`.
+const SPEED_INPUT_WIDTH: Pixels = px(56.);
+/// The size of the buttons that step the playback speed.
+const SPEED_BUTTON_SIZE: Pixels = px(20.);
 
 /// Shows one image, fitted to the viewer or zoomed and panned by the user.
 pub struct Viewer {
@@ -114,6 +119,11 @@ pub struct Viewer {
     /// The bounds of the seek bar in the last frame, to tell the frame under
     /// the mouse.
     seek_bar: Option<Bounds<Pixels>>,
+    /// Shows the playback speed and changes it when one is entered.
+    speed_input: Entity<TextInput>,
+    /// The speed `speed_input` was last set to show, to show it again once it
+    /// changes.
+    shown_speed: f32,
 }
 
 /// An active left-button interaction in the viewer.
@@ -146,17 +156,26 @@ impl Viewer {
         images: Entity<Images>,
         settings: &Entity<SettingsStore>,
         context_menu: Entity<ContextMenu>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let id = cx.entity_id();
-        // List the folder again when hidden files are shown or hidden.
         cx.observe(settings, |this, settings, cx| {
-            let show_hidden = settings.read(cx).settings().show_hidden_files;
+            let settings = settings.read(cx).settings();
+            let show_hidden = settings.show_hidden_files;
+            let clamp = settings.clamp_short_animation_delays;
+            // List the folder again when hidden files are shown or hidden.
             if show_hidden != this.show_hidden {
                 this.show_hidden = show_hidden;
                 this.folder = None;
                 this.folder_task = None;
                 this.list_folder(cx);
+            }
+            // The animation played does nothing unless the setting changed.
+            if let Some(animation) = &this.animation {
+                animation.playback.update(cx, |playback, cx| {
+                    playback.set_clamp_short_delays(clamp, cx);
+                });
             }
         })
         .detach();
@@ -167,6 +186,12 @@ impl Viewer {
         .detach();
         cx.subscribe(&images, |this, _, event, cx| {
             this.on_images_event(event, cx);
+        })
+        .detach();
+        let speed_input =
+            cx.new(|cx| TextInput::new(format_speed(DEFAULT_PLAYBACK_SPEED).into(), window, cx));
+        cx.subscribe_in(&speed_input, window, |this, _, event, window, cx| {
+            this.on_speed_input(event, window, cx);
         })
         .detach();
 
@@ -195,6 +220,8 @@ impl Viewer {
             resume: None,
             still: None,
             seek_bar: None,
+            speed_input,
+            shown_speed: DEFAULT_PLAYBACK_SPEED,
         };
         this.load(path, Direction::Next, cx);
         this
@@ -473,7 +500,12 @@ impl Viewer {
             .filter(|(key, _)| *key == self.key)
             .map(|(_, resume)| resume);
         let key = self.key.clone();
-        let playback = cx.new(|cx| Playback::new(&key.path, resume, cx));
+        let clamp = self
+            .settings
+            .read(cx)
+            .settings()
+            .clamp_short_animation_delays;
+        let playback = cx.new(|cx| Playback::new(&key.path, resume, clamp, cx));
         let subscriptions = [
             cx.observe(&playback, |this, playback, cx| {
                 this.on_playback_changed(&playback, cx);
@@ -498,6 +530,11 @@ impl Viewer {
                 || self.downscale_task.is_some())
         {
             self.want_downscaled(None, cx);
+        }
+        // Only once it changes, as this comes at every frame and would drop
+        // what is being typed.
+        if (self.speed(cx) - self.shown_speed).abs() > f32::EPSILON {
+            self.show_speed(cx);
         }
         cx.notify();
     }
@@ -544,6 +581,74 @@ impl Viewer {
         if let Some(animation) = &self.animation {
             animation.playback.update(cx, Playback::toggle_play_pause);
         }
+    }
+
+    /// Plays the animation, if the image is one, at the fastest preset speed
+    /// slower than its speed.
+    pub fn decrease_speed(&mut self, cx: &mut Context<Self>) {
+        if let Some(animation) = &self.animation {
+            animation.playback.update(cx, Playback::decrease_speed);
+        }
+    }
+
+    /// Plays the animation, if the image is one, at the slowest preset speed
+    /// faster than its speed.
+    pub fn increase_speed(&mut self, cx: &mut Context<Self>) {
+        if let Some(animation) = &self.animation {
+            animation.playback.update(cx, Playback::increase_speed);
+        }
+    }
+
+    /// Plays the animation, if the image is one, at the speed the file
+    /// records.
+    pub fn reset_speed(&mut self, cx: &mut Context<Self>) {
+        if let Some(animation) = &self.animation {
+            animation.playback.update(cx, Playback::reset_speed);
+        }
+    }
+
+    /// The playback speed of the current image: of its session, or where it
+    /// was left while the tab is hidden, or else the speed a new one starts
+    /// at.
+    fn speed(&self, cx: &App) -> f32 {
+        let resumed = || {
+            self.resume
+                .as_ref()
+                .filter(|(key, _)| *key == self.key)
+                .map(|(_, resume)| resume.speed())
+        };
+        self.playback_state(cx)
+            .map(PlaybackState::speed)
+            .or_else(resumed)
+            .unwrap_or(DEFAULT_PLAYBACK_SPEED)
+    }
+
+    /// Shows the playback speed in its field, dropping what was typed there.
+    fn show_speed(&mut self, cx: &mut Context<Self>) {
+        self.shown_speed = self.speed(cx);
+        let text = format_speed(self.shown_speed).into();
+        self.speed_input
+            .update(cx, |input, cx| input.reset_text(text, cx));
+    }
+
+    /// Plays at the speed entered, if it is one, and gives the keys back to
+    /// the viewer. What was typed and not entered is dropped.
+    fn on_speed_input(
+        &mut self,
+        event: &TextInputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let TextInputEvent::Submitted(text) = event {
+            if let (Some(speed), Some(animation)) = (parse_speed(text), &self.animation) {
+                animation
+                    .playback
+                    .update(cx, |playback, cx| playback.set_speed(speed, cx));
+            }
+            // The pane takes the focus back.
+            window.blur(cx);
+        }
+        self.show_speed(cx);
     }
 
     /// The frame under `x` on the seek bar.
@@ -795,8 +900,8 @@ impl Viewer {
 
 impl Viewer {
     /// The bar over the bottom of an animation that plays and pauses it,
-    /// seeks in it and tells the frame shown. A press on it does not reach
-    /// the image, but still focuses the pane.
+    /// seeks in it, tells the frame shown and changes its speed. A press on it
+    /// does not reach the image, but still focuses the pane.
     fn render_controls(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         if self.error.is_some() {
             return None;
@@ -851,16 +956,7 @@ impl Viewer {
                 )
                 .size_full(),
             );
-        // Wide enough for the largest numbers, so that the bar keeps its
-        // width as they change.
-        #[expect(clippy::cast_precision_loss)]
-        let digits = frame_count.to_string().len() as f32;
-        let counter = div()
-            .flex_shrink_0()
-            .min_w(px(DIGIT_WIDTH * (digits * 2. + 3.)))
-            .text_right()
-            .font_features(FontFeatures(Arc::new(vec![("tnum".into(), 1)])))
-            .child(format!("{} / {frame_count}", frame + 1));
+        let speed = self.render_speed(&theme, cx);
         let bar = div()
             .flex()
             .items_center()
@@ -892,7 +988,8 @@ impl Viewer {
             .on_scroll(|_, _, cx| cx.stop_propagation())
             .child(play_button)
             .child(seek_bar)
-            .child(counter);
+            .child(frame_counter(frame, frame_count))
+            .child(speed);
         // Centered by a box across the viewer that has no listeners, so that
         // the image can be panned beside the bar.
         Some(
@@ -906,6 +1003,47 @@ impl Viewer {
                 .justify_center()
                 .child(bar),
         )
+    }
+
+    /// The part of the controls that changes the speed: buttons that step it
+    /// down and up through the presets, around a field that shows it and
+    /// takes one typed in. A press on the field focuses it rather than the
+    /// pane.
+    fn render_speed(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let (slower, faster) = self.playback_state(cx).map_or((false, false), |state| {
+            (state.can_decrease_speed(), state.can_increase_speed())
+        });
+        div()
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .gap_1()
+            .pl_2()
+            .border_l_1()
+            .border_color(theme.menu_border)
+            .child(speed_button(
+                "speed-down",
+                "\u{2212}",
+                slower,
+                theme,
+                cx.listener(|this, _: &ClickEvent, _, cx| this.decrease_speed(cx)),
+            ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_0p5()
+                    // The field fills the width it is given.
+                    .child(div().w(SPEED_INPUT_WIDTH).child(self.speed_input.clone()))
+                    .child("x"),
+            )
+            .child(speed_button(
+                "speed-up",
+                "+",
+                faster,
+                theme,
+                cx.listener(|this, _: &ClickEvent, _, cx| this.increase_speed(cx)),
+            ))
     }
 }
 
@@ -997,6 +1135,48 @@ fn follow_drag(
             }
         }
     });
+}
+
+/// The number of the frame shown and of all frames, in room wide enough for
+/// the largest numbers, so that the bar keeps its width as they change.
+fn frame_counter(frame: usize, frame_count: usize) -> impl IntoElement {
+    #[expect(clippy::cast_precision_loss)]
+    let digits = frame_count.to_string().len() as f32;
+    div()
+        .flex_shrink_0()
+        .min_w(px(DIGIT_WIDTH * (digits * 2. + 3.)))
+        .text_right()
+        .font_features(FontFeatures(Arc::new(vec![("tnum".into(), 1)])))
+        .child(format!("{} / {frame_count}", frame + 1))
+}
+
+/// A button of the controls of an animation that steps its speed, drawn
+/// dimmed and doing nothing unless `enabled`. A press on it does not pan the
+/// image, as the controls take it.
+fn speed_button(
+    id: &'static str,
+    label: &'static str,
+    enabled: bool,
+    theme: &Theme,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let hover = theme.element_hover;
+    div()
+        .id(id)
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
+        .size(SPEED_BUTTON_SIZE)
+        .rounded_sm()
+        .text_sm()
+        .when(enabled, |this| {
+            this.text_color(theme.text_strong)
+                .hover(move |style| style.bg(hover))
+                .on_click(on_click)
+        })
+        .when(!enabled, |this| this.text_color(theme.text_disabled))
+        .child(label)
 }
 
 /// Draws a pause icon if `playing`, or else a play icon, in the 12 × 12
