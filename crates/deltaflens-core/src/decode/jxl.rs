@@ -16,7 +16,7 @@ use jxl_render::ImageBuffer;
 
 use super::{
     DecodedImage,
-    animation::{AnimationInfo, DecodedFrame, FrameSource, normalize_delay, plays, usable_profile},
+    animation::{AnimationInfo, DecodedFrame, FrameSource, plays, usable_profile},
     convert_to_srgb, describes_srgb, limits,
 };
 
@@ -218,10 +218,7 @@ impl FrameSource for JxlFrames {
         Ok(Some(DecodedFrame {
             index,
             image,
-            delay: normalize_delay(
-                ticks_to_duration(ticks, self.ticks_per_second),
-                Duration::ZERO,
-            ),
+            delay: ticks_to_duration(ticks, self.ticks_per_second),
         }))
     }
 

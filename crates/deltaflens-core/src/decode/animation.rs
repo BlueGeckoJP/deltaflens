@@ -50,8 +50,7 @@ pub struct DecodedFrame {
     /// The whole image at this frame, as [`decode`](super::decode) gives it:
     /// in sRGB, with the orientation applied.
     pub image: DecodedImage,
-    /// How long the frame is shown, with delays too short to be meant
-    /// replaced as browsers do.
+    /// How long the frame is shown, as the file records it. It may be 0.
     pub delay: Duration,
 }
 
@@ -151,39 +150,12 @@ pub(super) fn plays(count: u32) -> LoopCount {
     NonZeroU32::new(count).map_or(LoopCount::Infinite, LoopCount::Finite)
 }
 
-/// What a delay too short to be meant becomes, as in browsers: GIF delays of
-/// up to 10 ms and delays of 0 in the other formats. This keeps such
-/// animations from running at full speed.
-const DEFAULT_DELAY: Duration = Duration::from_millis(100);
-
-/// The longest delay of a GIF frame taken as not meant.
-const GIF_TOO_SHORT: Duration = Duration::from_millis(10);
-
-/// Returns `delay`, or [`DEFAULT_DELAY`] if it is no longer than
-/// `too_short`.
-pub(super) fn normalize_delay(delay: Duration, too_short: Duration) -> Duration {
-    if delay <= too_short {
-        DEFAULT_DELAY
-    } else {
-        delay
-    }
-}
-
 /// The animated formats that `image` decodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Format {
     Gif,
     Png,
     WebP,
-}
-
-impl Format {
-    fn too_short_delay(self) -> Duration {
-        match self {
-            Format::Gif => GIF_TOO_SHORT,
-            Format::Png | Format::WebP => Duration::ZERO,
-        }
-    }
 }
 
 /// The frames of a GIF, APNG or WebP animation, through the animation
@@ -268,7 +240,7 @@ impl FrameSource for ImageFrames {
             .read()
             .wrap_err_with(|| format!("failed to decode frame {index}"))?;
         self.next += 1;
-        let delay = normalize_delay(frame.delay().into(), self.format.too_short_delay());
+        let delay = frame.delay().into();
         let mut image = DynamicImage::ImageRgba8(frame.into_buffer());
         image.apply_orientation(self.orientation);
         let image = rgba_to_image(image.into_rgba8(), self.icc.as_deref(), &self.path);
@@ -570,18 +542,18 @@ mod tests {
     }
 
     #[test]
-    fn finite_loops_and_too_short_delays() {
-        // GIF: delays of 0, 10 and 20 ms; repeated once.
+    fn finite_loops_and_short_delays() {
+        // GIF: delays of 0, 10 and 20 ms, as they are; repeated once.
         let mut source = open("anim-loop2.gif");
         assert_eq!(source.info().loop_count, finite(2));
         let delays: Vec<_> = read_to_end(&mut *source).iter().map(|f| f.delay).collect();
-        assert_eq!(delays, [ms(100), ms(100), ms(20)]);
+        assert_eq!(delays, [ms(0), ms(10), ms(20)]);
 
         // WebP: delays of 0, 10 and 20 ms; played twice.
         let mut source = open("anim-loop2.webp");
         assert_eq!(source.info().loop_count, finite(2));
         let delays: Vec<_> = read_to_end(&mut *source).iter().map(|f| f.delay).collect();
-        assert_eq!(delays, [ms(100), ms(10), ms(20)]);
+        assert_eq!(delays, [ms(0), ms(10), ms(20)]);
 
         // JPEG XL: durations of 50 ms and 0; played twice.
         let mut source = open("anim-loop2.jxl");
@@ -590,13 +562,13 @@ mod tests {
         let colors: Vec<_> = frames.iter().map(color).collect();
         assert_eq!(colors, [RED, BLUE]);
         let delays: Vec<_> = frames.iter().map(|f| f.delay).collect();
-        assert_eq!(delays, [ms(50), ms(100)]);
+        assert_eq!(delays, [ms(50), ms(0)]);
     }
 
     #[test]
     fn apng_default_image_outside_the_animation_is_skipped() {
         // The default image is white and not a frame; then red with a delay
-        // of 0/0 and blue for 25/100 seconds, played twice.
+        // of 0/0, which is 0, and blue for 25/100 seconds, played twice.
         let mut source = open("anim-thumbnail.apng");
         let info = source.info();
         assert_eq!((info.frame_count, info.loop_count), (2, finite(2)));
@@ -604,7 +576,7 @@ mod tests {
         let colors: Vec<_> = frames.iter().map(color).collect();
         assert_eq!(colors, [RED, BLUE]);
         let delays: Vec<_> = frames.iter().map(|f| f.delay).collect();
-        assert_eq!(delays, [ms(100), ms(250)]);
+        assert_eq!(delays, [ms(0), ms(250)]);
     }
 
     #[test]
@@ -705,25 +677,6 @@ mod tests {
         // The default image of an APNG, even if it is not a frame.
         let image = decode(&fixture("anim-thumbnail.apng")).unwrap();
         assert_eq!(image.into_pixels(), [255; 4].repeat(8));
-    }
-
-    #[test]
-    fn gif_delays_up_to_10_ms_are_too_short() {
-        for (delay, expected) in [(0, 100), (10, 100), (11, 11), (20, 20)] {
-            assert_eq!(normalize_delay(ms(delay), GIF_TOO_SHORT), ms(expected));
-        }
-    }
-
-    #[test]
-    fn other_delays_of_0_are_too_short() {
-        for format in [Format::Png, Format::WebP] {
-            for (delay, expected) in [(0, 100), (1, 1), (10, 10)] {
-                assert_eq!(
-                    normalize_delay(ms(delay), format.too_short_delay()),
-                    ms(expected)
-                );
-            }
-        }
     }
 
     #[test]
