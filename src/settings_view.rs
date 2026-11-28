@@ -169,6 +169,7 @@ impl Render for SettingsView {
         let image_cache_mib = settings.image_cache_mib;
         let show_hidden = settings.show_hidden_files;
         let horizontal_tabs = settings.horizontal_tabs;
+        let clamp_short_delays = settings.clamp_short_animation_delays;
         let theme = theme(cx);
         div()
             .id("settings")
@@ -229,6 +230,19 @@ impl Render for SettingsView {
                 ),
             ))
             .child(Self::render_image_cache(image_cache_mib, &theme, cx))
+            .child(row(
+                "Clamp short animation delays",
+                button(
+                    "clamp-short-delays",
+                    if clamp_short_delays { "On" } else { "Off" },
+                    true,
+                    false,
+                    &theme,
+                    cx.listener(move |this, _, _, cx| {
+                        this.change(|s| s.clamp_short_animation_delays = !clamp_short_delays, cx);
+                    }),
+                ),
+            ))
             .child(row(
                 "Open with (<path> is the file; Enter to apply)",
                 div().w(px(320.)).child(self.open_command.clone()),

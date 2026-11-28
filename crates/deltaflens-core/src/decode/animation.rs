@@ -40,6 +40,11 @@ pub struct AnimationInfo {
     /// The number of frames, at least 2.
     pub frame_count: usize,
     pub loop_count: LoopCount,
+    /// The longest delay of a frame that browsers take as too short to be
+    /// meant, and show for longer: 10 ms in GIF and 0 in the other formats.
+    /// The delays of [`DecodedFrame`] are kept as they are, so that this is
+    /// applied as it is played, or not.
+    pub too_short_delay: Duration,
 }
 
 /// A frame of an animation.
@@ -158,6 +163,16 @@ enum Format {
     WebP,
 }
 
+impl Format {
+    /// See [`AnimationInfo::too_short_delay`].
+    fn too_short_delay(self) -> Duration {
+        match self {
+            Format::Gif => Duration::from_millis(10),
+            Format::Png | Format::WebP => Duration::ZERO,
+        }
+    }
+}
+
 /// The frames of a GIF, APNG or WebP animation, through the animation
 /// decoders of `image`, which have no random access: seeking backward
 /// decodes from the first frame again.
@@ -198,6 +213,7 @@ impl ImageFrames {
                 height,
                 frame_count: counted.frame_count,
                 loop_count: counted.loop_count,
+                too_short_delay: format.too_short_delay(),
             },
             frames: Some(frames),
             orientation,
@@ -467,13 +483,14 @@ mod tests {
 
     #[test]
     fn reads_the_info() {
-        for name in RGB {
+        for (name, too_short_delay) in RGB.into_iter().zip([ms(10), ms(0), ms(0), ms(0)]) {
             let info = open(name).info();
             let expected = AnimationInfo {
                 width: 4,
                 height: 2,
                 frame_count: 3,
                 loop_count: LoopCount::Infinite,
+                too_short_delay,
             };
             assert_eq!(info, expected, "{name}");
         }

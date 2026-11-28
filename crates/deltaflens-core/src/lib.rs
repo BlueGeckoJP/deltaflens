@@ -40,8 +40,8 @@ pub use layout::{Axis, DropZone, Layout, Side, drop_zone};
 pub use lru::LruCache;
 pub use pane::Pane;
 pub use playback::{
-    Advance, DEFAULT_PLAYBACK_SPEED, PlaybackState, PlaybackStatus, format_speed, parse_speed,
-    scale_delay,
+    Advance, DEFAULT_PLAYBACK_SPEED, PlaybackState, PlaybackStatus, effective_delay, format_speed,
+    parse_speed, scale_delay,
 };
 pub use preset::Preset;
 pub use session::Session;

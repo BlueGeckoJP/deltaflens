@@ -160,14 +160,22 @@ impl Viewer {
         cx: &mut Context<Self>,
     ) -> Self {
         let id = cx.entity_id();
-        // List the folder again when hidden files are shown or hidden.
         cx.observe(settings, |this, settings, cx| {
-            let show_hidden = settings.read(cx).settings().show_hidden_files;
+            let settings = settings.read(cx).settings();
+            let show_hidden = settings.show_hidden_files;
+            let clamp = settings.clamp_short_animation_delays;
+            // List the folder again when hidden files are shown or hidden.
             if show_hidden != this.show_hidden {
                 this.show_hidden = show_hidden;
                 this.folder = None;
                 this.folder_task = None;
                 this.list_folder(cx);
+            }
+            // The animation played does nothing unless the setting changed.
+            if let Some(animation) = &this.animation {
+                animation.playback.update(cx, |playback, cx| {
+                    playback.set_clamp_short_delays(clamp, cx);
+                });
             }
         })
         .detach();
@@ -492,7 +500,12 @@ impl Viewer {
             .filter(|(key, _)| *key == self.key)
             .map(|(_, resume)| resume);
         let key = self.key.clone();
-        let playback = cx.new(|cx| Playback::new(&key.path, resume, cx));
+        let clamp = self
+            .settings
+            .read(cx)
+            .settings()
+            .clamp_short_animation_delays;
+        let playback = cx.new(|cx| Playback::new(&key.path, resume, clamp, cx));
         let subscriptions = [
             cx.observe(&playback, |this, playback, cx| {
                 this.on_playback_changed(&playback, cx);

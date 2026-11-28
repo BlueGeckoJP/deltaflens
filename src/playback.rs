@@ -1,7 +1,8 @@
 //! Plays an animation in a viewer. A thread decodes its frames a few ahead of
 //! the one shown, so that the memory taken stays the same however long it
 //! is, and a timer shows each frame once the one before has been shown for its
-//! delay at the speed it plays at.
+//! delay, with delays too short to be meant made longer if the settings say
+//! so, at the speed it plays at.
 //!
 //! Every seek starts a new generation. The thread drops the frames it decodes
 //! for an older one, so that only the latest seek is decoded while the seek
@@ -15,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use deltaflens_core::{AnimationInfo, FrameSource, PlaybackState, open_animation};
+use deltaflens_core::{AnimationInfo, FrameSource, PlaybackState, effective_delay, open_animation};
 use eyre::Result;
 use futures::{StreamExt as _, channel::mpsc};
 use gpui::{App, Context, EventEmitter, RenderImage, Task};
@@ -90,7 +91,7 @@ struct ReadyFrame {
     /// The place of the frame in the animation, from 0.
     index: usize,
     image: Arc<RenderImage>,
-    /// How long it is shown.
+    /// How long it is shown, as the file records it.
     delay: Duration,
 }
 
@@ -351,6 +352,10 @@ impl Resume {
 /// Plays an animation: decodes its frames in a thread of its own, shows each
 /// when it is due, and frees their textures once they are not shown. Dropping
 /// the session ends the thread and frees the textures.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the flags are independent, not states of one machine"
+)]
 pub struct Playback {
     shared: Arc<Shared>,
     /// Known once the thread opens the animation, or from where it was left.
@@ -371,6 +376,8 @@ pub struct Playback {
     /// Whether the thread failed to decode a frame for the latest seek, and
     /// waits for another.
     failed: bool,
+    /// Whether delays too short to be meant are made longer, as browsers do.
+    clamp_short_delays: bool,
     /// Shows the next frame once the shown one has been shown for its delay,
     /// with when it began to wait: when the frame was shown, or played on
     /// after a pause.
@@ -383,8 +390,14 @@ impl EventEmitter<NotAnimated> for Playback {}
 
 impl Playback {
     /// Starts playing the image at `path` if it is an animation, from where
-    /// it was left if `resume` tells.
-    pub fn new(path: &Path, resume: Option<Resume>, cx: &mut Context<Self>) -> Self {
+    /// it was left if `resume` tells, making delays too short to be meant
+    /// longer if `clamp_short_delays`.
+    pub fn new(
+        path: &Path,
+        resume: Option<Resume>,
+        clamp_short_delays: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let shared = Arc::new(Shared::default());
         let (sender, mut receiver) = mpsc::unbounded();
         let spawned = thread::Builder::new().name("playback".into()).spawn({
@@ -420,6 +433,7 @@ impl Playback {
             ahead: VecDeque::new(),
             late: false,
             failed: false,
+            clamp_short_delays,
             timer: None,
             _messages: messages,
         }
@@ -499,7 +513,7 @@ impl Playback {
             .as_mut()
             .is_some_and(|state| state.set_speed(speed));
         if set {
-            self.on_speed_changed(cx);
+            self.on_timing_changed(cx);
         }
         set
     }
@@ -512,7 +526,7 @@ impl Playback {
             .as_mut()
             .is_some_and(PlaybackState::decrease_speed)
         {
-            self.on_speed_changed(cx);
+            self.on_timing_changed(cx);
         }
     }
 
@@ -524,7 +538,7 @@ impl Playback {
             .as_mut()
             .is_some_and(PlaybackState::increase_speed)
         {
-            self.on_speed_changed(cx);
+            self.on_timing_changed(cx);
         }
     }
 
@@ -532,13 +546,23 @@ impl Playback {
     pub fn reset_speed(&mut self, cx: &mut Context<Self>) {
         if let Some(state) = &mut self.state {
             state.reset_speed();
-            self.on_speed_changed(cx);
+            self.on_timing_changed(cx);
         }
     }
 
-    /// Waits for the shown frame at the new speed, less the time it has
-    /// waited already, so that going faster does not wait out a slow wait.
-    fn on_speed_changed(&mut self, cx: &mut Context<Self>) {
+    /// Makes delays too short to be meant longer, as browsers do, or keeps
+    /// them as they are. The shown frame waits for its new delay at once.
+    pub fn set_clamp_short_delays(&mut self, clamp: bool, cx: &mut Context<Self>) {
+        if self.clamp_short_delays != clamp {
+            self.clamp_short_delays = clamp;
+            self.on_timing_changed(cx);
+        }
+    }
+
+    /// Waits for the shown frame for its new delay or at the new speed, less
+    /// the time it has waited already, so that a shorter wait does not wait
+    /// out a longer one.
+    fn on_timing_changed(&mut self, cx: &mut Context<Self>) {
         // Dropping the task stops it.
         if let Some((since, _)) = self.timer.take() {
             self.start_timer(since, cx);
@@ -607,10 +631,11 @@ impl Playback {
     /// is moved on from in a later turn of the UI thread, after it has
     /// handled input.
     fn start_timer(&mut self, since: Instant, cx: &mut Context<Self>) {
-        let (Some(state), Some(shown)) = (&self.state, &self.shown) else {
+        let (Some(info), Some(state), Some(shown)) = (&self.info, &self.state, &self.shown) else {
             return;
         };
-        let wait = wait_for(state.scaled_delay(shown.delay), since.elapsed());
+        let delay = effective_delay(shown.delay, info.too_short_delay, self.clamp_short_delays);
+        let wait = wait_for(state.scaled_delay(delay), since.elapsed());
         let generation = self.generation;
         let task = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(wait).await;

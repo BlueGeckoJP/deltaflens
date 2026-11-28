@@ -35,6 +35,24 @@ pub fn format_speed(speed: f32) -> String {
     speed.to_string()
 }
 
+/// What a delay too short to be meant becomes, as in browsers. This keeps
+/// such animations from running at full speed.
+const DEFAULT_SHORT_DELAY: Duration = Duration::from_millis(100);
+
+/// How long a frame of `delay` is shown at the speed the file records. If
+/// `clamp`, a delay no longer than `too_short`, the
+/// [`too_short_delay`](crate::AnimationInfo::too_short_delay) of the
+/// animation, becomes 100 ms as in browsers; otherwise it stays as it is.
+/// The speed divides the delay this gives.
+#[must_use]
+pub fn effective_delay(delay: Duration, too_short: Duration, clamp: bool) -> Duration {
+    if clamp && delay <= too_short {
+        DEFAULT_SHORT_DELAY
+    } else {
+        delay
+    }
+}
+
 /// How long a frame of `delay` is shown at `speed`: a delay of 0 stays 0, and
 /// one too long to hold becomes [`Duration::MAX`].
 #[must_use]
@@ -800,6 +818,61 @@ mod tests {
         assert_eq!(
             scale_delay(Duration::from_secs(u64::MAX / 2), 0.25),
             Duration::MAX
+        );
+    }
+
+    const GIF_TOO_SHORT: Duration = Duration::from_millis(10);
+
+    #[test]
+    fn gif_delays_up_to_10_ms_are_clamped() {
+        for (delay, expected) in [(0, 100), (10, 100), (11, 11), (20, 20)] {
+            assert_eq!(
+                effective_delay(ms(delay), GIF_TOO_SHORT, true),
+                ms(expected),
+                "{delay}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_delays_of_0_are_clamped() {
+        for (delay, expected) in [(0, 100), (1, 1), (10, 10)] {
+            assert_eq!(
+                effective_delay(ms(delay), Duration::ZERO, true),
+                ms(expected),
+                "{delay}"
+            );
+        }
+    }
+
+    #[test]
+    fn delays_stay_as_they_are_without_clamping() {
+        for too_short in [GIF_TOO_SHORT, Duration::ZERO] {
+            for delay in [0, 1, 10, 11, 20] {
+                assert_eq!(
+                    effective_delay(ms(delay), too_short, false),
+                    ms(delay),
+                    "{delay}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clamped_delays_are_divided_by_the_speed() {
+        let state = at_speed(2.0);
+        let shown = |delay, too_short, clamp| {
+            state.scaled_delay(effective_delay(ms(delay), too_short, clamp))
+        };
+        assert_eq!(shown(0, GIF_TOO_SHORT, true), ms(50));
+        assert_eq!(shown(10, GIF_TOO_SHORT, true), ms(50));
+        assert_eq!(shown(0, Duration::ZERO, true), ms(50));
+        assert_eq!(shown(0, GIF_TOO_SHORT, false), Duration::ZERO);
+        assert_eq!(shown(10, GIF_TOO_SHORT, false), ms(5));
+        assert_eq!(shown(20, GIF_TOO_SHORT, true), ms(10));
+        assert_eq!(
+            at_speed(0.5).scaled_delay(effective_delay(ms(0), GIF_TOO_SHORT, true)),
+            ms(200)
         );
     }
 

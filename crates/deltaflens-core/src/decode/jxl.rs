@@ -70,6 +70,7 @@ pub(super) fn open_animation(path: &Path) -> Result<Option<JxlFrames>> {
         height: prepared.image.height(),
         frame_count,
         loop_count,
+        too_short_delay: Duration::ZERO,
     };
     Ok(Some(JxlFrames {
         prepared,
