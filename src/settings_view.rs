@@ -3,7 +3,7 @@ use gpui::{AnyElement, Context, Entity, SharedString, Window, div, prelude::*, p
 
 use crate::{
     settings::SettingsStore,
-    text_input::{Submitted, TextInput},
+    text_input::{TextInput, TextInputEvent},
     theme::{Theme, theme},
 };
 
@@ -24,7 +24,9 @@ impl SettingsView {
     ) -> Self {
         let command: SharedString = settings.read(cx).settings().open_command.clone().into();
         let open_command = cx.new(|cx| TextInput::new(command, window, cx));
-        cx.subscribe(&open_command, |this, _, Submitted(text), cx| {
+        // Entered, or left by moving elsewhere.
+        cx.subscribe(&open_command, |this, _, event, cx| {
+            let (TextInputEvent::Submitted(text) | TextInputEvent::Blurred(text)) = event;
             let text = text.trim().to_owned();
             if text.is_empty() {
                 return;
